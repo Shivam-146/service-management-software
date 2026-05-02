@@ -1,0 +1,11 @@
+# Basic Security
+Options -Indexes
+
+# Custom Error Pages
+ErrorDocument 404 /cctv/index.php
+
+# Rewriting (if needed later)
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    # Add rules here if URL reshaping is required
+</IfModule>
