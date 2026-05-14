@@ -16,7 +16,7 @@ try {
     $history = $stmt->fetchAll();
 
     // Map products to resolve parts JSON
-    $prodStmt = $pdo->query("SELECT id, item_name FROM products");
+    $prodStmt = $pdo->query("SELECT id, product_name as item_name FROM products");
     $products = [];
     while ($row = $prodStmt->fetch()) {
         $products[$row['id']] = $row['item_name'];

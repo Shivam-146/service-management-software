@@ -28,7 +28,7 @@ try {
     $partsConsumed = json_decode($complaint['parts_consumed'], true) ?? [];
     $resolvedParts = [];
     foreach ($partsConsumed as $part) {
-        $pStmt = $pdo->prepare("SELECT item_name, unit_price FROM products WHERE id = ?");
+        $pStmt = $pdo->prepare("SELECT product_name as item_name, unit_price FROM products WHERE id = ?");
         $pStmt->execute([$part['product_id']]);
         $product = $pStmt->fetch(PDO::FETCH_ASSOC);
         if ($product) {

@@ -35,8 +35,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['generate_invoice'])) 
         
         try {
             $paymentMethod = $_POST['payment_method'] ?? 'Cash';
-            $ins = $pdo->prepare("INSERT INTO invoices (complaint_id, invoice_no, subtotal, gst_amount, grand_total, payment_status, payment_method) VALUES (?, ?, ?, ?, ?, 'Unpaid', ?)");
-            $ins->execute([$complaintId, $invoiceNo, $subtotal, $gstAmount, $grandTotal, $paymentMethod]);
+            $paymentStatus = ($paymentMethod === 'Pay Later') ? 'Unpaid' : 'Paid';
+            $ins = $pdo->prepare("INSERT INTO invoices (complaint_id, invoice_no, subtotal, gst_amount, grand_total, payment_status, payment_method) VALUES (?, ?, ?, ?, ?, ?, ?)");
+            $ins->execute([$complaintId, $invoiceNo, $subtotal, $gstAmount, $grandTotal, $paymentStatus, $paymentMethod]);
+            $invoiceId = $pdo->lastInsertId();
+
+            if ($paymentStatus === 'Paid') {
+                $cStmt = $pdo->prepare("SELECT customer_id FROM complaints WHERE id = ?");
+                $cStmt->execute([$complaintId]);
+                $custId = $cStmt->fetchColumn();
+                
+                $payStmt = $pdo->prepare("INSERT INTO payments (customer_id, invoice_id, payment_date, amount, payment_method, notes) VALUES (?, ?, ?, ?, ?, ?)");
+                $payStmt->execute([$custId, $invoiceId, date('Y-m-d H:i:s'), $grandTotal, $paymentMethod, "Invoice #$invoiceNo generated as Paid by technician"]);
+            }
+            
             $successMsg = "Invoice generated successfully! You can now print and hand it to the customer.";
         } catch (PDOException $e) {
             $errorMsg = "Error generating invoice: " . $e->getMessage();
@@ -53,10 +65,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_payment'])) {
     $status = $_POST['payment_status'];
     
     try {
+        $pdo->beginTransaction();
+        
+        // Check if status is changing to Paid to record in ledger
+        $oldStmt = $pdo->prepare("SELECT payment_status, grand_total, complaint_id FROM invoices WHERE id = ?");
+        $oldStmt->execute([$invoiceId]);
+        $oldData = $oldStmt->fetch();
+
         $stmt = $pdo->prepare("UPDATE invoices SET payment_method = ?, payment_status = ? WHERE id = ?");
         $stmt->execute([$method, $status, $invoiceId]);
-        $successMsg = "Payment details updated!";
+
+        if ($oldData['payment_status'] !== 'Paid' && $status === 'Paid') {
+            $cStmt = $pdo->prepare("SELECT customer_id FROM complaints WHERE id = ?");
+            $cStmt->execute([$oldData['complaint_id']]);
+            $custId = $cStmt->fetchColumn();
+
+            $payStmt = $pdo->prepare("INSERT INTO payments (customer_id, invoice_id, payment_date, amount, payment_method, notes) VALUES (?, ?, ?, ?, ?, ?)");
+            $payStmt->execute([$custId, $invoiceId, date('Y-m-d H:i:s'), $oldData['grand_total'], $method, "Payment marked as Paid by technician"]);
+        }
+
+        $pdo->commit();
+        $successMsg = "Payment details updated and recorded!";
     } catch (PDOException $e) {
+        $pdo->rollBack();
         $errorMsg = "Error: " . $e->getMessage();
     }
 }
@@ -138,8 +169,8 @@ require_once '../includes/header.php';
                             <td class="px-6 py-4 text-sm">
                                 <div class="flex items-center gap-2">
                                     <span class="px-2 py-1 rounded-lg text-[10px] font-bold uppercase <?php 
-                                        if (!$invoice['payment_method']) echo 'bg-slate-100 text-slate-500';
-                                        elseif ($invoice['payment_method'] === 'UPI') echo 'bg-purple-100 text-purple-700';
+                                        if (!$invoice['payment_method'] || $invoice['payment_method'] === 'Pay Later') echo 'bg-slate-100 text-slate-500';
+                                        elseif ($invoice['payment_method'] === 'Bank') echo 'bg-purple-100 text-purple-700';
                                         else echo 'bg-amber-100 text-amber-700'; 
                                     ?>">
                                         <?php echo $invoice['payment_method'] ?: 'PENDING'; ?>
@@ -204,7 +235,8 @@ require_once '../includes/header.php';
                 <label class="block text-sm font-bold text-slate-700 mb-2 uppercase tracking-wider">Payment Method</label>
                 <select name="payment_method" required class="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-500 transition">
                     <option value="Cash">Cash Payment</option>
-                    <option value="UPI">UPI / Digital Payment</option>
+                    <option value="Bank">Bank / Digital Payment</option>
+                    <option value="Pay Later">Pay Later</option>
                 </select>
             </div>
             <div class="flex items-center gap-3 pt-6 border-t border-slate-100">
@@ -229,9 +261,9 @@ require_once '../includes/header.php';
             <div>
                 <label class="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-widest">Method</label>
                 <select name="payment_method" id="edit_payment_method" class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
-                    <option value="">None (Unpaid)</option>
+                    <option value="Pay Later">Pay Later</option>
                     <option value="Cash">Cash</option>
-                    <option value="UPI">UPI</option>
+                    <option value="Bank">Bank</option>
                 </select>
             </div>
             <div>

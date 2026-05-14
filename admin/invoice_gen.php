@@ -24,12 +24,18 @@ try {
         die("Complaint not found.");
     }
 
-    // Fetch Company/Admin Settings for Invoice Header
-    $adminStmt = $pdo->query("SELECT fullname, address, phone FROM users WHERE role = 'admin' LIMIT 1");
-    $adminSettings = $adminStmt->fetch();
-    $companyName = !empty($adminSettings['fullname']) ? $adminSettings['fullname'] : 'CCTV SECURE';
-    $companyAddress = !empty($adminSettings['address']) ? nl2br(htmlspecialchars($adminSettings['address'])) : 'Tech Hub, Sector 5';
-    $companyPhone = !empty($adminSettings['phone']) ? $adminSettings['phone'] : '+91 98765 43210';
+    // Fetch Company Profile Settings for Invoice Header
+    $profileStmt = $pdo->query("SELECT * FROM company_profile LIMIT 1");
+    $profile = $profileStmt->fetch();
+    
+    $companyName = !empty($profile['company_name']) ? $profile['company_name'] : 'CCTV SECURE';
+    $companyAddress = !empty($profile['address']) ? nl2br(htmlspecialchars($profile['address'])) : 'Tech Hub, Sector 5';
+    $companyPhone = !empty($profile['contact_number']) ? $profile['contact_number'] : '+91 98765 43210';
+    $companyEmail = !empty($profile['email']) ? $profile['email'] : '';
+    $companyGst = !empty($profile['gst_number']) ? $profile['gst_number'] : '';
+    $companyBank = !empty($profile['bank_details']) ? nl2br(htmlspecialchars($profile['bank_details'])) : '';
+    $companyLogo = !empty($profile['logo']) ? $profile['logo'] : '';
+    $companySignature = !empty($profile['signature']) ? $profile['signature'] : '';
 
     // Parse parts consumed
     $partsConsumed = json_decode($complaint['parts_consumed'], true) ?? [];
@@ -40,7 +46,7 @@ try {
     
     if (!empty($partsConsumed)) {
         foreach ($partsConsumed as $part) {
-            $pStmt = $pdo->prepare("SELECT item_name, unit_price FROM products WHERE id = ?");
+            $pStmt = $pdo->prepare("SELECT product_name as item_name, unit_price FROM products WHERE id = ?");
             $pStmt->execute([$part['product_id']]);
             $product = $pStmt->fetch();
             
@@ -87,9 +93,19 @@ $isPrint = isset($_GET['print']);
 
 <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-12 max-w-4xl mx-auto mb-10" id="invoice-printable">
     <div class="flex justify-between items-start mb-12">
-        <div>
-            <h1 class="text-3xl font-black text-indigo-600 mb-2"><?php echo htmlspecialchars($companyName); ?></h1>
-            <p class="text-slate-500 text-sm">Service & Maintenance Specialist<br><?php echo $companyAddress; ?><br>Support: <?php echo htmlspecialchars($companyPhone); ?></p>
+        <div class="flex items-start gap-6">
+            <?php if ($companyLogo): ?>
+                <img src="../uploads/<?php echo $companyLogo; ?>" class="h-24 w-24 object-contain">
+            <?php endif; ?>
+            <div>
+                <h1 class="text-3xl font-black text-indigo-600 mb-2"><?php echo htmlspecialchars($companyName); ?></h1>
+                <p class="text-slate-500 text-xs leading-relaxed">
+                    <?php echo $companyAddress; ?><br>
+                    Support: <?php echo htmlspecialchars($companyPhone); ?> 
+                    <?php if ($companyEmail): ?> | <?php echo htmlspecialchars($companyEmail); ?><?php endif; ?>
+                    <?php if ($companyGst): ?><br><span class="font-bold">GSTIN: <?php echo htmlspecialchars($companyGst); ?></span><?php endif; ?>
+                </p>
+            </div>
         </div>
         <div class="text-right">
             <h2 class="text-4xl font-light text-slate-400 uppercase tracking-widest mb-4">Invoice</h2>
@@ -151,31 +167,43 @@ $isPrint = isset($_GET['print']);
         </tbody>
     </table>
 
-    <div class="flex justify-end">
-        <div class="w-full max-w-xs space-y-4">
-            <div class="flex justify-between text-sm">
-                <span class="text-slate-500">Subtotal:</span>
-                <span class="text-slate-800 font-bold">₹<?php echo number_format($subtotal, 2); ?></span>
-            </div>
-            <div class="flex justify-between text-sm">
-                <span class="text-slate-500">GST (18%):</span>
-                <span class="text-slate-800 font-bold">₹<?php echo number_format($subtotal * 0.18, 2); ?></span>
-            </div>
-            <div class="pt-4 border-t-2 border-indigo-600 flex justify-between items-center text-xl">
-                <span class="font-black text-slate-800 uppercase tracking-wider">Grand Total:</span>
-                <span class="font-black text-indigo-600">₹<?php echo number_format($subtotal * 1.18, 2); ?></span>
+    <div class="grid grid-cols-2 gap-12">
+        <div class="p-6 bg-slate-50 border border-slate-100">
+            <h3 class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3">Bank Details for Payment:</h3>
+            <p class="text-xs text-slate-600 leading-relaxed font-medium">
+                <?php echo $companyBank ?: 'Contact support for bank details.'; ?>
+            </p>
+        </div>
+        <div class="flex justify-end">
+            <div class="w-full max-w-xs space-y-4">
+                <div class="flex justify-between text-sm">
+                    <span class="text-slate-500">Subtotal:</span>
+                    <span class="text-slate-800 font-bold">₹<?php echo number_format($subtotal, 2); ?></span>
+                </div>
+                <div class="flex justify-between text-sm">
+                    <span class="text-slate-500">GST (18%):</span>
+                    <span class="text-slate-800 font-bold">₹<?php echo number_format($subtotal * 0.18, 2); ?></span>
+                </div>
+                <div class="pt-4 border-t-2 border-indigo-600 flex justify-between items-center text-xl">
+                    <span class="font-black text-slate-800 uppercase tracking-wider">Grand Total:</span>
+                    <span class="font-black text-indigo-600">₹<?php echo number_format($subtotal * 1.18, 2); ?></span>
+                </div>
             </div>
         </div>
     </div>
 
     <div class="mt-20 pt-10 border-t border-slate-100 grid grid-cols-2 text-[10px] text-slate-400 uppercase tracking-widest">
         <div>
-            <p class="font-bold mb-2">Terms & Conditions</p>
-            <p>1. Warranty on parts as per manufacturer.<br>2. Service warranty for 7 days only.<br>3. This is a computer generated invoice.</p>
+            <p class="font-bold mb-2 text-slate-600">Terms & Conditions</p>
+            <p class="leading-relaxed">1. Warranty on parts as per manufacturer.<br>2. Service warranty for 7 days only.<br>3. This is a computer generated invoice.</p>
         </div>
-        <div class="text-right flex flex-col justify-end">
-            <div class="mb-2 h-10 w-32 border-b border-slate-300 ml-auto"></div>
-            <p>Authorized Signature</p>
+        <div class="text-right flex flex-col justify-end items-end">
+            <?php if ($companySignature): ?>
+                <img src="../uploads/<?php echo $companySignature; ?>" class="h-16 w-32 object-contain mb-2">
+            <?php else: ?>
+                <div class="mb-2 h-10 w-32 border-b border-slate-300"></div>
+            <?php endif; ?>
+            <p class="font-bold text-slate-800 italic">Authorized Signature</p>
         </div>
     </div>
 </div>

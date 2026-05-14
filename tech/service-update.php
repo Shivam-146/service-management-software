@@ -6,136 +6,17 @@ require_once '../includes/db_connect.php';
 $complaintId = $_GET['id'] ?? null;
 if (!$complaintId) header("Location: dashboard.php");
 
-// Handle Form Submission
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $status = $_POST['status'] ?? null;
-    $remarks = $_POST['remarks'] ?? '';
-
-    if (!$status) {
-        $error = "Please select a service status (In-Progress or Completed) before saving.";
-    } else {
-    $partsJson = null;
-    $photoBefore = null;
-    $photoAfter = null;
-
-    // Handle Parts JSON
-    if (!empty($_POST['parts'])) {
-        $partsData = [];
-        foreach ($_POST['parts'] as $index => $partId) {
-            if (!empty($partId)) {
-                $partsData[] = [
-                    'product_id' => $partId,
-                    'qty' => $_POST['qtys'][$index] ?? 1
-                ];
-            }
-        }
-        $partsJson = json_encode($partsData);
-    }
-
-    // Handle Photo Uploads
-    $uploadDir = '../uploads/complaints/';
-    if (!is_dir($uploadDir)) mkdir($uploadDir, 0777, true);
-
-    if (isset($_FILES['photo_before']) && $_FILES['photo_before']['error'] === 0) {
-        $name = $complaintId . "_before_" . time() . "." . pathinfo($_FILES['photo_before']['name'], PATHINFO_EXTENSION);
-        move_uploaded_file($_FILES['photo_before']['tmp_name'], $uploadDir . $name);
-        $photoBefore = '/cctv/uploads/complaints/' . $name;
-    }
-
-    if (isset($_FILES['photo_after']) && $_FILES['photo_after']['error'] === 0) {
-        $name = $complaintId . "_after_" . time() . "." . pathinfo($_FILES['photo_after']['name'], PATHINFO_EXTENSION);
-        move_uploaded_file($_FILES['photo_after']['tmp_name'], $uploadDir . $name);
-        $photoAfter = '/cctv/uploads/complaints/' . $name;
-    }
-
-    // Update Complaint
-    try {
-        $pdo->beginTransaction();
-
-        // 1. Restore previous inventory quantities before overwriting
-        $oldStmt = $pdo->prepare("SELECT parts_consumed FROM complaints WHERE id = ?");
-        $oldStmt->execute([$complaintId]);
-        $oldRow = $oldStmt->fetch();
-        if ($oldRow && !empty($oldRow['parts_consumed'])) {
-            $oldParts = json_decode($oldRow['parts_consumed'], true);
-            if (is_array($oldParts)) {
-                foreach ($oldParts as $op) {
-                    $restore = $pdo->prepare("UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?");
-                    $restore->execute([$op['qty'], $op['product_id']]);
-                }
-            }
-        }
-
-        // 2. Update the complaint record
-        $query = "UPDATE complaints SET status = ?, tech_remarks = ?";
-        $params = [$status, $remarks];
-
-        if ($partsJson) { $query .= ", parts_consumed = ?"; $params[] = $partsJson; }
-        if ($photoBefore) { $query .= ", photo_before = ?"; $params[] = $photoBefore; }
-        if ($photoAfter) { $query .= ", photo_after = ?"; $params[] = $photoAfter; }
-
-        if ($status === 'In-Progress') {
-            $query .= ", started_at = COALESCE(started_at, CURRENT_TIMESTAMP)";
-        }
-        if ($status === 'Completed') {
-            $query .= ", completed_at = CURRENT_TIMESTAMP";
-        }
-
-        $query .= " WHERE id = ?";
-        $params[] = $complaintId;
-
-        $stmt = $pdo->prepare($query);
-        $stmt->execute($params);
-
-        // 3. Deduct newly submitted inventory quantities
-        if (!empty($partsData)) {
-            foreach ($partsData as $np) {
-                // Ensure we don't go below 0 using MAX() logic, but simple minus is fine here
-                $deduct = $pdo->prepare("UPDATE products SET stock_qty = stock_qty - ? WHERE id = ?");
-                $deduct->execute([$np['qty'], $np['product_id']]);
-            }
-        }
-
-        $pdo->commit();
-        $success = "Job updated successfully! Inventory synchronized.";
-
-        // Auto-generate Invoice if status is Completed
-        if ($status === 'Completed' && isset($_POST['payment_method'])) {
-            $paymentMethod = $_POST['payment_method'];
-            if ($paymentMethod === 'Unpaid') $paymentMethod = null;
-            
-            // Calculate Total from Parts Data
-            $grandTotal = 0;
-            if (!empty($partsData)) {
-                foreach ($partsData as $p) {
-                    $pStmt = $pdo->prepare("SELECT unit_price FROM products WHERE id = ?");
-                    $pStmt->execute([$p['product_id']]);
-                    if ($prod = $pStmt->fetch()) {
-                        $grandTotal += ($prod['unit_price'] * $p['qty']);
-                    }
-                }
-            }
-            
-            $invoiceNo = 'INV' . time() . rand(10, 99);
-            $ins = $pdo->prepare("INSERT INTO invoices (complaint_id, invoice_no, subtotal, gst_amount, grand_total, payment_status, payment_method) VALUES (?, ?, ?, ?, ?, 'Unpaid', ?)");
-            $ins->execute([$complaintId, $invoiceNo, $grandTotal, 0, $grandTotal, $paymentMethod]);
-            $success .= " Invoice #$invoiceNo generated.";
-        }
-
-    } catch (Exception $e) {
-        $pdo->rollBack();
-        $error = "Error: " . $e->getMessage();
-    }
-    }
-}
-
-// Fetch Data
+// Fetch Data first so it's available for POST processing
 try {
     $complaintStmt = $pdo->prepare("SELECT c.*, cust.customer_name FROM complaints c JOIN customers cust ON c.customer_id = cust.id WHERE c.id = ?");
     $complaintStmt->execute([$complaintId]);
     $complaint = $complaintStmt->fetch();
 
-    $productsRes = $pdo->query("SELECT id, item_name, unit_price FROM products WHERE stock_qty > 0");
+    if (!$complaint) {
+        die("Complaint not found.");
+    }
+
+    $productsRes = $pdo->query("SELECT id, product_name as item_name, unit_price FROM products WHERE current_stock > 0");
     $products = $productsRes->fetchAll();
     
     // For JS calculations
@@ -146,6 +27,145 @@ try {
 
 } catch (PDOException $e) {
     die("Error: " . $e->getMessage());
+}
+
+// Handle Form Submission
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $status = $_POST['status'] ?? null;
+    $remarks = $_POST['remarks'] ?? '';
+
+    if (!$status) {
+        $error = "Please select a service status (In-Progress or Completed) before saving.";
+    } else {
+        $partsJson = null;
+        $photoBefore = null;
+        $photoAfter = null;
+
+        // Handle Parts JSON
+        if (!empty($_POST['parts'])) {
+            $partsData = [];
+            foreach ($_POST['parts'] as $index => $partId) {
+                if (!empty($partId)) {
+                    $partsData[] = [
+                        'product_id' => $partId,
+                        'qty' => $_POST['qtys'][$index] ?? 1
+                    ];
+                }
+            }
+            $partsJson = json_encode($partsData);
+        }
+
+        // Handle Photo Uploads
+        $uploadDir = '../uploads/complaints/';
+        if (!is_dir($uploadDir)) mkdir($uploadDir, 0777, true);
+
+        if (isset($_FILES['photo_before']) && $_FILES['photo_before']['error'] === 0) {
+            $name = $complaintId . "_before_" . time() . "." . pathinfo($_FILES['photo_before']['name'], PATHINFO_EXTENSION);
+            move_uploaded_file($_FILES['photo_before']['tmp_name'], $uploadDir . $name);
+            $photoBefore = '/cctv/uploads/complaints/' . $name;
+        }
+
+        if (isset($_FILES['photo_after']) && $_FILES['photo_after']['error'] === 0) {
+            $name = $complaintId . "_after_" . time() . "." . pathinfo($_FILES['photo_after']['name'], PATHINFO_EXTENSION);
+            move_uploaded_file($_FILES['photo_after']['tmp_name'], $uploadDir . $name);
+            $photoAfter = '/cctv/uploads/complaints/' . $name;
+        }
+
+        // Update Complaint
+        try {
+            $pdo->beginTransaction();
+
+            // 1. Restore previous inventory quantities before overwriting
+            $oldStmt = $pdo->prepare("SELECT parts_consumed FROM complaints WHERE id = ?");
+            $oldStmt->execute([$complaintId]);
+            $oldRow = $oldStmt->fetch();
+            if ($oldRow && !empty($oldRow['parts_consumed'])) {
+                $oldParts = json_decode($oldRow['parts_consumed'], true);
+                if (is_array($oldParts)) {
+                    foreach ($oldParts as $op) {
+                        $restore = $pdo->prepare("UPDATE products SET current_stock = current_stock + ? WHERE id = ?");
+                        $restore->execute([$op['qty'], $op['product_id']]);
+                        
+                        // Log Restoration Movement
+                        $mov = $pdo->prepare("INSERT INTO stock_movements (product_id, type, quantity, notes) VALUES (?, 'Stock In', ?, ?)");
+                        $mov->execute([$op['product_id'], $op['qty'], "Reversing consumed parts for Ticket #$complaintId update"]);
+                    }
+                }
+            }
+
+            // 2. Update the complaint record
+            $query = "UPDATE complaints SET status = ?, tech_remarks = ?";
+            $params = [$status, $remarks];
+
+            if ($partsJson) { $query .= ", parts_consumed = ?"; $params[] = $partsJson; }
+            if ($photoBefore) { $query .= ", photo_before = ?"; $params[] = $photoBefore; }
+            if ($photoAfter) { $query .= ", photo_after = ?"; $params[] = $photoAfter; }
+
+            if ($status === 'In-Progress') {
+                $query .= ", started_at = COALESCE(started_at, CURRENT_TIMESTAMP)";
+            }
+            if ($status === 'Completed') {
+                $query .= ", completed_at = CURRENT_TIMESTAMP";
+            }
+
+            $query .= " WHERE id = ?";
+            $params[] = $complaintId;
+
+            $stmt = $pdo->prepare($query);
+            $stmt->execute($params);
+
+            // 3. Deduct newly submitted inventory quantities
+            if (!empty($partsData)) {
+                foreach ($partsData as $np) {
+                    $deduct = $pdo->prepare("UPDATE products SET current_stock = current_stock - ? WHERE id = ?");
+                    $deduct->execute([$np['qty'], $np['product_id']]);
+                    
+                    // Log Deduction Movement
+                    $mov = $pdo->prepare("INSERT INTO stock_movements (product_id, type, quantity, notes) VALUES (?, 'Stock Out', ?, ?)");
+                    $mov->execute([$np['product_id'], $np['qty'], "Parts consumed for Ticket #$complaintId"]);
+                }
+            }
+
+            $pdo->commit();
+            $success = "Job updated successfully! Inventory synchronized.";
+
+            // Auto-generate Invoice and record payment if status is Completed
+            if ($status === 'Completed' && isset($_POST['payment_method'])) {
+                $paymentMethod = $_POST['payment_method'];
+                $paymentStatus = ($paymentMethod === 'Pay Later') ? 'Unpaid' : 'Paid';
+                
+                // Calculate Total from Parts Data
+                $grandTotal = 0;
+                if (!empty($partsData)) {
+                    foreach ($partsData as $p) {
+                        $pStmt = $pdo->prepare("SELECT unit_price FROM products WHERE id = ?");
+                        $pStmt->execute([$p['product_id']]);
+                        if ($prod = $pStmt->fetch()) {
+                            $grandTotal += ($prod['unit_price'] * $p['qty']);
+                        }
+                    }
+                }
+                
+                $invoiceNo = 'INV' . time() . rand(10, 99);
+                $ins = $pdo->prepare("INSERT INTO invoices (complaint_id, invoice_no, subtotal, gst_amount, grand_total, payment_status, payment_method) VALUES (?, ?, ?, ?, ?, ?, ?)");
+                $ins->execute([$complaintId, $invoiceNo, $grandTotal, 0, $grandTotal, $paymentStatus, $paymentMethod]);
+                $invoiceId = $pdo->lastInsertId();
+
+                // Record payment in ledger if it's not 'Pay Later'
+                if ($paymentStatus === 'Paid') {
+                    $payStmt = $pdo->prepare("INSERT INTO payments (customer_id, invoice_id, payment_date, amount, payment_method, notes) VALUES (?, ?, ?, ?, ?, ?)");
+                    $payStmt->execute([$complaint['customer_id'], $invoiceId, date('Y-m-d H:i:s'), $grandTotal, $paymentMethod, "Payment received by technician for Ticket #$complaintId"]);
+                    $success .= " Payment recorded in ledger.";
+                }
+                
+                $success .= " Invoice #$invoiceNo generated.";
+            }
+
+        } catch (Exception $e) {
+            $pdo->rollBack();
+            $error = "Error: " . $e->getMessage();
+        }
+    }
 }
 
 require_once '../includes/header.php';
@@ -234,14 +254,14 @@ require_once '../includes/header.php';
                         <span class="text-xs font-bold">Cash</span>
                     </label>
                     <label class="flex flex-col items-center justify-center p-3 border-2 border-white/10 rounded-2xl cursor-pointer hover:bg-white/5 transition has-[:checked]:bg-indigo-500 has-[:checked]:border-indigo-400">
-                        <input type="radio" name="payment_method" value="UPI" class="sr-only">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z" /></svg>
-                        <span class="text-xs font-bold">UPI / QR</span>
+                        <input type="radio" name="payment_method" value="Bank" class="sr-only">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 14v3a2 2 0 002 2h4a2 2 0 002-2v-3m-10 0V8a2 2 0 012-2h4a2 2 0 012 2v6M4 18h16" /></svg>
+                        <span class="text-xs font-bold">Bank / QR</span>
                     </label>
                     <label class="flex flex-col items-center justify-center p-3 border-2 border-white/10 rounded-2xl cursor-pointer hover:bg-white/5 transition has-[:checked]:bg-indigo-500 has-[:checked]:border-indigo-400 col-span-2">
-                        <input type="radio" name="payment_method" value="Unpaid" class="sr-only">
+                        <input type="radio" name="payment_method" value="Pay Later" class="sr-only">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                        <span class="text-xs font-bold uppercase tracking-widest">Unpaid / Pay Later</span>
+                        <span class="text-xs font-bold uppercase tracking-widest">Pay Later</span>
                     </label>
                 </div>
                 <p class="text-[10px] text-slate-400 italic">Marking as 'Completed' will automatically generate the invoice.</p>

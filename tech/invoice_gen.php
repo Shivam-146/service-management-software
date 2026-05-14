@@ -41,7 +41,7 @@ try {
     
     if (!empty($partsConsumed)) {
         foreach ($partsConsumed as $part) {
-            $pStmt = $pdo->prepare("SELECT item_name, unit_price FROM products WHERE id = ?");
+            $pStmt = $pdo->prepare("SELECT product_name, unit_price FROM products WHERE id = ?");
             $pStmt->execute([$part['product_id']]);
             $product = $pStmt->fetch();
             
@@ -51,7 +51,7 @@ try {
                 $total = $qty * $price;
                 
                 $lines[] = [
-                    'name' => $product['item_name'],
+                    'name' => $product['product_name'],
                     'price' => $price,
                     'qty' => $qty,
                     'total' => $total

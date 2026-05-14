@@ -14,7 +14,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_product'])) {
     $warranty = $_POST['warranty_months'];
     
     try {
-        $stmt = $pdo->prepare("INSERT INTO products (item_name, category, serial_number, unit_price, stock_qty, warranty_months) VALUES (?, ?, ?, ?, ?, ?)");
+        $stmt = $pdo->prepare("INSERT INTO products (product_name, category, serial_number, unit_price, current_stock, warranty_months) VALUES (?, ?, ?, ?, ?, ?)");
         $stmt->execute([$item_name, $category, $sn, $price, $qty, $warranty]);
         $successMsg = "Product added to inventory successfully!";
     } catch (PDOException $e) {
@@ -33,7 +33,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_product'])) {
     $warranty = $_POST['warranty_months'];
     
     try {
-        $stmt = $pdo->prepare("UPDATE products SET item_name=?, category=?, serial_number=?, unit_price=?, stock_qty=?, warranty_months=? WHERE id=?");
+        $stmt = $pdo->prepare("UPDATE products SET product_name=?, category=?, serial_number=?, unit_price=?, current_stock=?, warranty_months=? WHERE id=?");
         $stmt->execute([$item_name, $category, $sn, $price, $qty, $warranty, $id]);
         $successMsg = "Product updated successfully!";
     } catch (PDOException $e) {
@@ -43,7 +43,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_product'])) {
 
 // Fetch Products
 try {
-    $stmt = $pdo->query("SELECT * FROM products ORDER BY item_name ASC");
+    $stmt = $pdo->query("SELECT id, product_name as item_name, category, serial_number, unit_price, current_stock as stock_qty, warranty_months FROM products ORDER BY product_name ASC");
     $products = $stmt->fetchAll();
 } catch (PDOException $e) {
     echo "Error: " . $e->getMessage();

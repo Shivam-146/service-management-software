@@ -5,7 +5,7 @@ require_once '../includes/db_connect.php';
 require_once '../includes/header.php';
 
 try {
-    $products = $pdo->query("SELECT * FROM products ORDER BY category ASC, item_name ASC")->fetchAll();
+    $products = $pdo->query("SELECT id, product_name as item_name, category, unit_price, current_stock as stock_qty, warranty_months FROM products ORDER BY category ASC, product_name ASC")->fetchAll();
 } catch (PDOException $e) {
     echo "Error: " . $e->getMessage();
 }
