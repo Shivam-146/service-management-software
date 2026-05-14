@@ -44,7 +44,6 @@ require_once '../includes/header.php';
     <div class="flex items-center justify-between">
         <h2 class="text-2xl font-bold text-slate-800">Account Settings</h2>
     </div>
-
     <?php if ($successMessage): ?>
     <div class="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-xl text-sm font-medium">
         <?php echo $successMessage; ?>

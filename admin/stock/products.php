@@ -18,34 +18,41 @@ if (isset($_GET['delete'])) {
 }
 
 // Handle Add/Update
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+// Handle Add/Update
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['adjust_stock'])) {
     $id = $_POST['id'] ?? null;
     $cat_id = ($_POST['category_id'] ?? null) ?: null;
-    $name = $_POST['product_name'] ?? null;
-    $code = $_POST['product_code'] ?? null;
+    $name = trim($_POST['product_name'] ?? '');
+    $code = !empty(trim($_POST['product_code'])) ? trim($_POST['product_code']) : null;
     $unit = $_POST['unit'] ?? 'Pcs';
     $min = $_POST['opening_stock'] ?? 0;
+    $price = $_POST['unit_price'] ?? 0; // Added this line
     $desc = $_POST['description'] ?? null;
 
     if ($name) {
         try {
             if ($id) {
-                // Get old opening stock to calculate difference
                 $old_prod = $pdo->prepare("SELECT opening_stock FROM products WHERE id = ?");
                 $old_prod->execute([$id]);
                 $old_opening = $old_prod->fetchColumn() ?: 0;
                 $diff = $min - $old_opening;
 
-                $stmt = $pdo->prepare("UPDATE products SET category_id=?, product_name=?, product_code=?, unit=?, opening_stock=?, current_stock = current_stock + ?, description=? WHERE id=?");
-                $stmt->execute([$cat_id, $name, $code, $unit, $min, $diff, $desc, $id]);
+                // Added unit_price = ? to the UPDATE query
+                $stmt = $pdo->prepare("UPDATE products SET category_id=?, product_name=?, product_code=?, unit=?, opening_stock=?, unit_price=?, current_stock = current_stock + ?, description=? WHERE id=?");
+                $stmt->execute([$cat_id, $name, $code, $unit, $min, $price, $diff, $desc, $id]);
                 $successMsg = "Product updated successfully!";
             } else {
-                $stmt = $pdo->prepare("INSERT INTO products (category_id, product_name, product_code, unit, opening_stock, current_stock, description) VALUES (?, ?, ?, ?, ?, ?, ?)");
-                $stmt->execute([$cat_id, $name, $code, $unit, $min, $min, $desc]);
+                // Added unit_price and ? to the INSERT query
+                $stmt = $pdo->prepare("INSERT INTO products (category_id, product_name, product_code, unit, opening_stock, unit_price, current_stock, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+                $stmt->execute([$cat_id, $name, $code, $unit, $min, $price, $min, $desc]);
                 $successMsg = "Product added successfully!";
             }
         } catch (PDOException $e) {
-            $errorMsg = "Product code already exists.";
+            if ($e->getCode() == 23000) {
+                $errorMsg = "Product code already exists.";
+            } else {
+                $errorMsg = "Database Error: " . $e->getMessage();
+            }
         }
     }
 }
@@ -241,11 +248,15 @@ require_once '../../includes/header.php';
                 </div>
                 <div>
                     <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Unit (e.g. Pcs, Mtr)</label>
-                    <input type="text" name="unit" id="prod_unit" value="Pcs" class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                    <input type="text" name="unit" id="prod_unit" placeholder="Pcs" class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
                 </div>
                 <div>
-                    <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Opening Stock Qty</label>
-                    <input type="number" name="opening_stock" id="prod_min" value="0" class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                    <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Selling Price (₹) *</label>
+                    <input type="number" step="0.01" name="unit_price" id="prod_price" required placeholder="0.00" class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                </div>
+                <div>
+                    <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Opening Stock</label>
+                    <input type="number" name="opening_stock" id="prod_min" placeholder="0" class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
                 </div>
                 <div class="md:col-span-2">
                     <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Description</label>
@@ -271,20 +282,22 @@ function openModal() {
     document.getElementById('prod_unit').value = 'Pcs';
     document.getElementById('prod_min').value = '5';
     document.getElementById('prod_desc').value = '';
+    document.getElementById('prod_price').value = '';
 }
 function closeModal() {
     document.getElementById('productModal').classList.add('hidden');
 }
 function editProduct(data) {
-    openModal();
+    document.getElementById('productModal').classList.remove('hidden');
     document.getElementById('modalTitle').innerText = 'Edit Product';
     document.getElementById('prod_id').value = data.id;
     document.getElementById('prod_name').value = data.product_name;
-    document.getElementById('prod_cat').value = data.category_id;
-    document.getElementById('prod_code').value = data.product_code;
-    document.getElementById('prod_unit').value = data.unit;
+    document.getElementById('prod_cat').value = data.category_id || '';
+    document.getElementById('prod_code').value = data.product_code || '';
+    document.getElementById('prod_unit').value = data.unit || 'Pcs';
+    document.getElementById('prod_price').value = data.unit_price;
     document.getElementById('prod_min').value = data.opening_stock;
-    document.getElementById('prod_desc').value = data.description;
+    document.getElementById('prod_desc').value = data.description || '';
 }
 
 function openAdjustModal(data) {

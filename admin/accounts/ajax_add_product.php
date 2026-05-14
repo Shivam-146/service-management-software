@@ -11,6 +11,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $code = $_POST['product_code'] ?? '';
     $unit = $_POST['unit'] ?? 'Pcs';
     $min = $_POST['opening_stock'] ?? 0;
+    $price = $_POST['unit_price'] ?? 0;
     $desc = $_POST['description'] ?? '';
 
     if (empty($name)) {
@@ -19,8 +20,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     try {
-        $stmt = $pdo->prepare("INSERT INTO products (category_id, product_name, product_code, unit, opening_stock, current_stock, description) VALUES (?, ?, ?, ?, ?, ?, ?)");
-        $stmt->execute([$cat_id, $name, $code, $unit, $min, $min, $desc]);
+        $stmt = $pdo->prepare("INSERT INTO products (category_id, product_name, product_code, unit, opening_stock, unit_price, current_stock, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+        $stmt->execute([$cat_id, $name, $code, $unit, $min, $price, $min, $desc]);
         $id = $pdo->lastInsertId();
 
         echo json_encode([

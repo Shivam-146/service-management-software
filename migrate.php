@@ -136,13 +136,13 @@ try {
         `subtotal` DECIMAL(10, 2),
         `gst_amount` DECIMAL(10, 2),
         `grand_total` DECIMAL(10, 2),
-        `payment_status` ENUM('Pending', 'Paid', 'Partial') DEFAULT 'Pending',
+        `payment_status` ENUM('Paid', 'Unpaid', 'Partial') DEFAULT 'Unpaid',
         `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )");
 
     $check_invoice_pm = $pdo->query("SHOW COLUMNS FROM `invoices` LIKE 'payment_method'");
     if ($check_invoice_pm->rowCount() == 0) {
-        $pdo->exec("ALTER TABLE `invoices` ADD `payment_method` ENUM('UPI', 'Cash', 'Bank Transfer', 'Cheque') DEFAULT 'Cash' AFTER `payment_status` text");
+        $pdo->exec("ALTER TABLE `invoices` ADD `payment_method` ENUM('Cash', 'UPI', 'Bank Transfer', 'Cheque') DEFAULT 'Cash' AFTER `payment_status` text");
         echo "<div class='log success'>✅ Added `payment_method` to `invoices` table.</div>";
     }
 
