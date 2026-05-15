@@ -7,7 +7,7 @@ require_once '../../includes/db_connect.php';
 $totalProducts = $pdo->query("SELECT COUNT(*) FROM products")->fetchColumn();
 $totalCategories = $pdo->query("SELECT COUNT(*) FROM stock_categories")->fetchColumn();
 $lowStockItems = $pdo->query("SELECT COUNT(*) FROM products WHERE current_stock < opening_stock")->fetchColumn();
-$recentPurchases = $pdo->query("SELECT COUNT(*) FROM purchases WHERE purchase_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)")->fetchColumn();
+$fieldStockValue = $pdo->query("SELECT (SELECT IFNULL(SUM(quantity),0) FROM technician_stock) + (SELECT COUNT(*) FROM product_serials WHERE technician_id IS NOT NULL AND status = 'In Stock')")->fetchColumn();
 
 require_once '../../includes/header.php';
 ?>
@@ -46,11 +46,11 @@ require_once '../../includes/header.php';
                 <div class="w-10 h-10 bg-rose-500 text-white rounded-xl flex items-center justify-center font-bold">!</div>
             </div>
         </div>
-        <div class="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm hover:shadow-md transition">
-            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Recent Purchases</p>
+        <div class="bg-indigo-600 p-6 rounded-3xl shadow-xl shadow-indigo-200">
+            <p class="text-[10px] font-bold text-indigo-200 uppercase tracking-widest mb-1">Field Stock (Technicians)</p>
             <div class="flex items-center justify-between">
-                <h3 class="text-3xl font-black text-slate-800"><?php echo $recentPurchases; ?></h3>
-                <div class="w-10 h-10 bg-slate-100 text-slate-500 rounded-xl flex items-center justify-center">🛒</div>
+                <h3 class="text-3xl font-black text-white"><?php echo $fieldStockValue; ?></h3>
+                <div class="w-10 h-10 bg-white/20 text-white rounded-xl flex items-center justify-center">👷</div>
             </div>
         </div>
     </div>
@@ -81,6 +81,11 @@ require_once '../../includes/header.php';
             <div class="w-14 h-14 bg-rose-600 text-white rounded-2xl flex items-center justify-center text-2xl mb-4 group-hover:scale-110 transition">🔄</div>
             <h3 class="text-lg font-bold text-slate-800 mb-1">Stock Movements</h3>
             <p class="text-sm text-slate-500">View detailed history of stock in, stock out & adjustments.</p>
+        </a>
+        <a href="allocation.php" class="group bg-indigo-50 p-6 rounded-3xl border border-indigo-100 shadow-sm hover:shadow-xl hover:-translate-y-1 transition duration-300">
+            <div class="w-14 h-14 bg-indigo-600 text-white rounded-2xl flex items-center justify-center text-2xl mb-4 group-hover:scale-110 transition">👷</div>
+            <h3 class="text-lg font-bold text-slate-800 mb-1">Inventory Allocation</h3>
+            <p class="text-sm text-slate-500">Hand over products & serials to technicians strictly.</p>
         </a>
         <a href="reports.php" class="group bg-white p-6 rounded-3xl border border-slate-100 shadow-sm hover:shadow-xl hover:-translate-y-1 transition duration-300">
             <div class="w-14 h-14 bg-indigo-100 text-indigo-600 rounded-2xl flex items-center justify-center text-2xl mb-4 group-hover:scale-110 transition">📊</div>

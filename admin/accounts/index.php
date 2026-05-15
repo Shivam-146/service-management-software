@@ -5,6 +5,14 @@ require_once '../../includes/header.php';
 
 $modules = [
     [
+        'title' => 'Sales Entry',
+        'link' => 'sales.php',
+        'icon' => '🛒',
+        'bg' => 'bg-indigo-100',
+        'text' => 'text-indigo-600',
+        'desc' => 'Record direct inventory sales and generate instant invoices.'
+    ],
+    [
         'title' => 'Income Entry',
         'link' => 'income.php',
         'icon' => '💰',

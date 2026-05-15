@@ -17,6 +17,19 @@ $isTechPath = str_contains($_SERVER['REQUEST_URI'], '/tech/');
         body {
             font-family: 'Inter', sans-serif;
         }
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
     </style>
 </head>
 <body class="bg-slate-50 text-slate-900">
@@ -24,7 +37,7 @@ $isTechPath = str_contains($_SERVER['REQUEST_URI'], '/tech/');
 <div class="flex min-h-screen">
     <?php if ($isAdminPath && isAdmin() && !isset($_GET['print'])): ?>
     <!-- Admin Sidebar -->
-    <aside class="w-64 bg-slate-900 text-white flex-shrink-0 fixed h-full transition-all duration-300 z-50">
+    <aside class="w-64 bg-slate-900 text-white flex-shrink-0 fixed h-full transition-all duration-300 z-50 overflow-y-auto custom-scrollbar">
         <div class="p-6">
             <h1 class="text-xl font-bold tracking-tight flex items-center gap-2">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -88,7 +101,7 @@ $isTechPath = str_contains($_SERVER['REQUEST_URI'], '/tech/');
     </aside>
     <?php elseif ($isTechPath && isTech() && !isset($_GET['print'])): ?>
     <!-- Tech Sidebar -->
-    <aside class="w-20 md:w-64 bg-slate-900 text-white flex-shrink-0 fixed h-full transition-all duration-300 z-50">
+    <aside class="w-20 md:w-64 bg-slate-900 text-white flex-shrink-0 fixed h-full transition-all duration-300 z-50 overflow-y-auto custom-scrollbar">
         <div class="p-4 md:p-6 text-center md:text-left">
             <h1 class="text-xl font-bold tracking-tight hidden md:flex items-center gap-2">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">

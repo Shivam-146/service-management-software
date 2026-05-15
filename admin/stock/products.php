@@ -26,7 +26,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['adjust_stock'])) {
     $code = !empty(trim($_POST['product_code'])) ? trim($_POST['product_code']) : null;
     $unit = $_POST['unit'] ?? 'Pcs';
     $min = $_POST['opening_stock'] ?? 0;
-    $price = $_POST['unit_price'] ?? 0; // Added this line
     $desc = $_POST['description'] ?? null;
 
     if ($name) {
@@ -37,14 +36,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['adjust_stock'])) {
                 $old_opening = $old_prod->fetchColumn() ?: 0;
                 $diff = $min - $old_opening;
 
-                // Added unit_price = ? to the UPDATE query
-                $stmt = $pdo->prepare("UPDATE products SET category_id=?, product_name=?, product_code=?, unit=?, opening_stock=?, unit_price=?, current_stock = current_stock + ?, description=? WHERE id=?");
-                $stmt->execute([$cat_id, $name, $code, $unit, $min, $price, $diff, $desc, $id]);
+                // Removed unit_price from the UPDATE query
+                $stmt = $pdo->prepare("UPDATE products SET category_id=?, product_name=?, product_code=?, unit=?, opening_stock=?, current_stock = current_stock + ?, description=? WHERE id=?");
+                $stmt->execute([$cat_id, $name, $code, $unit, $min, $diff, $desc, $id]);
                 $successMsg = "Product updated successfully!";
             } else {
-                // Added unit_price and ? to the INSERT query
-                $stmt = $pdo->prepare("INSERT INTO products (category_id, product_name, product_code, unit, opening_stock, unit_price, current_stock, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-                $stmt->execute([$cat_id, $name, $code, $unit, $min, $price, $min, $desc]);
+                // Removed unit_price from the INSERT query
+                $stmt = $pdo->prepare("INSERT INTO products (category_id, product_name, product_code, unit, opening_stock, current_stock, description) VALUES (?, ?, ?, ?, ?, ?, ?)");
+                $stmt->execute([$cat_id, $name, $code, $unit, $min, $min, $desc]);
                 $successMsg = "Product added successfully!";
             }
         } catch (PDOException $e) {
@@ -108,6 +107,10 @@ if ($filter_low) {
 $products = $pdo->prepare($query);
 $products->execute($params);
 $products = $products->fetchAll();
+
+// Fetch field stock stats
+$fieldStock = $pdo->query("SELECT product_id, SUM(quantity) as qty FROM technician_stock GROUP BY product_id")->fetchAll(PDO::FETCH_KEY_PAIR);
+$fieldSerials = $pdo->query("SELECT product_id, COUNT(*) as qty FROM product_serials WHERE technician_id IS NOT NULL AND status = 'In Stock' GROUP BY product_id")->fetchAll(PDO::FETCH_KEY_PAIR);
 
 $categories = $pdo->query("SELECT * FROM stock_categories ORDER BY category_name ASC")->fetchAll();
 
@@ -180,6 +183,16 @@ require_once '../../includes/header.php';
                         <tr class="hover:bg-slate-50/50 transition">
                             <td class="px-6 py-4">
                                 <p class="text-sm font-bold text-slate-800"><?php echo htmlspecialchars($p['product_name']); ?></p>
+                                <?php 
+                                    $stmt_sn = $pdo->prepare("SELECT COUNT(*) FROM product_serials WHERE product_id = ? AND status = 'In Stock'");
+                                    $stmt_sn->execute([$p['id']]);
+                                    $sn_count = $stmt_sn->fetchColumn();
+                                    if ($sn_count > 0): 
+                                ?>
+                                    <button onclick="viewSerials(<?php echo $p['id']; ?>, '<?php echo addslashes($p['product_name']); ?>')" class="text-[9px] font-bold text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded-none uppercase tracking-tighter hover:bg-indigo-100 transition mt-1">
+                                        <?php echo $sn_count; ?> Serials In Stock
+                                    </button>
+                                <?php endif; ?>
                             </td>
                             <td class="text-[10px] font-bold text-indigo-500 uppercase"><?php echo htmlspecialchars($p['product_code']); ?></td>
                             <td class="px-6 py-4 text-sm text-slate-500"><?php echo htmlspecialchars($p['category_name'] ?: 'Uncategorized'); ?></td>
@@ -251,10 +264,6 @@ require_once '../../includes/header.php';
                     <input type="text" name="unit" id="prod_unit" placeholder="Pcs" class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
                 </div>
                 <div>
-                    <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Selling Price (₹) *</label>
-                    <input type="number" step="0.01" name="unit_price" id="prod_price" required placeholder="0.00" class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
-                </div>
-                <div>
                     <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Opening Stock</label>
                     <input type="number" name="opening_stock" id="prod_min" placeholder="0" class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
                 </div>
@@ -282,7 +291,6 @@ function openModal() {
     document.getElementById('prod_unit').value = 'Pcs';
     document.getElementById('prod_min').value = '5';
     document.getElementById('prod_desc').value = '';
-    document.getElementById('prod_price').value = '';
 }
 function closeModal() {
     document.getElementById('productModal').classList.add('hidden');
@@ -295,7 +303,6 @@ function editProduct(data) {
     document.getElementById('prod_cat').value = data.category_id || '';
     document.getElementById('prod_code').value = data.product_code || '';
     document.getElementById('prod_unit').value = data.unit || 'Pcs';
-    document.getElementById('prod_price').value = data.unit_price;
     document.getElementById('prod_min').value = data.opening_stock;
     document.getElementById('prod_desc').value = data.description || '';
 }
@@ -307,6 +314,45 @@ function openAdjustModal(data) {
 }
 function closeAdjustModal() {
     document.getElementById('adjustModal').classList.add('hidden');
+}
+
+async function viewSerials(id, name) {
+    document.getElementById('vsModalTitle').innerText = 'Serials: ' + name;
+    document.getElementById('manageSerialsLink').href = `../stock/serials.php?search=${encodeURIComponent(name)}`;
+    const container = document.getElementById('serialsList');
+    container.innerHTML = '<p class="text-center text-slate-400 py-4 text-xs">Loading...</p>';
+    document.getElementById('viewSerialsModal').classList.remove('hidden');
+
+    try {
+        const response = await fetch(`../accounts/ajax_get_serials.php?product_id=${id}`);
+        const serials = await response.json();
+        
+        if (serials && serials.length > 0) {
+            container.innerHTML = `
+                <div class="grid grid-cols-2 gap-2 font-bold text-[9px] uppercase text-slate-400 mb-2 px-2">
+                    <span>Serial Number</span>
+                    <span class="text-right">Cost Price</span>
+                </div>
+            `;
+            serials.forEach(s => {
+                const div = document.createElement('div');
+                div.className = 'flex justify-between items-center p-2 bg-slate-50 rounded-none border border-slate-100';
+                div.innerHTML = `
+                    <span class="text-sm font-bold text-slate-700">${s.serial_number}</span>
+                    <span class="text-sm font-black text-indigo-600">₹${parseFloat(s.purchase_price).toFixed(2)}</span>
+                `;
+                container.appendChild(div);
+            });
+        } else {
+            container.innerHTML = '<p class="text-center text-slate-400 py-4 text-xs">No active serials found.</p>';
+        }
+    } catch (e) {
+        container.innerHTML = '<p class="text-center text-rose-500 py-4 text-xs">Error loading serials.</p>';
+    }
+}
+
+function closeVsModal() {
+    document.getElementById('viewSerialsModal').classList.add('hidden');
 }
 </script>
 
@@ -343,6 +389,27 @@ function closeAdjustModal() {
                 <button type="submit" class="flex-1 px-6 py-3 bg-slate-800 text-white rounded-none font-bold hover:bg-slate-900 transition shadow-none shadow-none">Update Stock</button>
             </div>
         </form>
+    </div>
+</div>
+
+<!-- View Serials Modal -->
+<div id="viewSerialsModal" class="hidden fixed inset-0 bg-slate-900/50 backdrop-none z-[110] flex items-center justify-center p-4">
+    <div class="bg-white rounded-none shadow-none w-full max-w-lg overflow-hidden transform transition-all">
+        <div class="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+            <h2 class="text-xl font-bold text-slate-800" id="vsModalTitle">In-Stock Serials</h2>
+            <button onclick="closeVsModal()" class="text-slate-400 hover:text-slate-600 transition">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+        </div>
+        <div class="p-6">
+            <div id="serialsList" class="space-y-2 max-h-64 overflow-y-auto">
+                <!-- List will be injected here -->
+            </div>
+        </div>
+        <div class="p-4 bg-slate-50 border-t border-slate-100 flex justify-between items-center">
+            <a href="../stock/serials.php" id="manageSerialsLink" class="text-xs font-bold text-indigo-600 hover:underline uppercase tracking-widest">Manage All Serials</a>
+            <button onclick="closeVsModal()" class="px-6 py-2 bg-white border border-slate-200 text-slate-600 rounded-none font-bold text-xs hover:bg-slate-50 transition">Close</button>
+        </div>
     </div>
 </div>
 

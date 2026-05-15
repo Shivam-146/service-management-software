@@ -245,7 +245,8 @@ require_once '../../includes/header.php';
                                     <!-- Total -->
                                     <div class="md:col-span-2 relative">
                                         <label class="md:hidden text-[9px] font-black text-slate-400 uppercase mb-1 block">Line Total</label>
-                                        <input type="number" step="0.01" name="row_total[]" readonly class="w-full bg-indigo-50 border border-indigo-100 rounded-none px-3 py-2.5 text-sm font-black text-indigo-600 text-right">
+                                        <input type="number" step="0.01" name="row_total[]" readonly class="w-full bg-indigo-50 border-indigo-100 rounded-none px-3 py-2.5 text-sm font-black text-indigo-600 text-right">
+                                        
                                         <input type="hidden" name="taxable_value[]" class="taxable-value">
                                         <input type="hidden" name="gst_amount[]" class="gst-amount">
                                         <input type="hidden" name="discount_amount[]" class="discount-amount">
@@ -400,7 +401,7 @@ require_once '../../includes/header.php';
     </div>
 </div>
 
-<!-- Add Product Modal -->
+<!-- Add Product Modal (already exists) -->
 <div id="productModal" class="hidden fixed inset-0 bg-slate-900/50 backdrop-none z-[100] flex items-center justify-center p-4">
     <div class="bg-white rounded-none shadow-none w-full max-w-xl overflow-hidden">
         <div class="p-6 border-b border-slate-100 flex justify-between items-center">
@@ -431,10 +432,6 @@ require_once '../../includes/header.php';
                 <div>
                     <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Unit</label>
                     <input type="text" name="unit" placeholder="Pcs" class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
-                </div>
-                <div>
-                    <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Selling Price (₹) *</label>
-                    <input type="number" step="0.01" name="unit_price" required placeholder="0.00" class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
                 </div>
                 <div>
                     <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Opening Stock Qty</label>

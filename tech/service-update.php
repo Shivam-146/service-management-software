@@ -16,7 +16,19 @@ try {
         die("Complaint not found.");
     }
 
-    $productsRes = $pdo->query("SELECT id, product_name as item_name, unit_price FROM products WHERE current_stock > 0");
+    $techId = $_SESSION['user_id'];
+    
+    // Fetch products that this technician has in stock (either serialized or quantity-based)
+    $productsRes = $pdo->prepare("
+        (SELECT p.id, p.product_name as item_name, p.unit_price FROM products p 
+         JOIN technician_stock ts ON p.id = ts.product_id 
+         WHERE ts.technician_id = ? AND ts.quantity > 0)
+        UNION
+        (SELECT DISTINCT p.id, p.product_name as item_name, p.unit_price FROM products p 
+         JOIN product_serials ps ON p.id = ps.product_id 
+         WHERE ps.technician_id = ? AND ps.status = 'In Stock')
+    ");
+    $productsRes->execute([$techId, $techId]);
     $products = $productsRes->fetchAll();
     
     // For JS calculations
@@ -40,6 +52,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $partsJson = null;
         $photoBefore = null;
         $photoAfter = null;
+        $success = "";
 
         // Handle Parts JSON
         if (!empty($_POST['parts'])) {
@@ -75,7 +88,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         try {
             $pdo->beginTransaction();
 
-            // 1. Restore previous inventory quantities before overwriting
+            // 1. Restore previous inventory quantities before overwriting (Restore to technician stock)
             $oldStmt = $pdo->prepare("SELECT parts_consumed FROM complaints WHERE id = ?");
             $oldStmt->execute([$complaintId]);
             $oldRow = $oldStmt->fetch();
@@ -83,12 +96,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $oldParts = json_decode($oldRow['parts_consumed'], true);
                 if (is_array($oldParts)) {
                     foreach ($oldParts as $op) {
-                        $restore = $pdo->prepare("UPDATE products SET current_stock = current_stock + ? WHERE id = ?");
-                        $restore->execute([$op['qty'], $op['product_id']]);
+                        // Restore to technician stock
+                        $restore = $pdo->prepare("UPDATE technician_stock SET quantity = quantity + ? WHERE product_id = ? AND technician_id = ?");
+                        $restore->execute([$op['qty'], $op['product_id'], $_SESSION['user_id']]);
                         
                         // Log Restoration Movement
                         $mov = $pdo->prepare("INSERT INTO stock_movements (product_id, type, quantity, notes) VALUES (?, 'Stock In', ?, ?)");
-                        $mov->execute([$op['product_id'], $op['qty'], "Reversing consumed parts for Ticket #$complaintId update"]);
+                        $mov->execute([$op['product_id'], $op['qty'], "Reversing technician consumed parts for Ticket #$complaintId update"]);
                     }
                 }
             }
@@ -114,42 +128,94 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stmt = $pdo->prepare($query);
             $stmt->execute($params);
 
-            // 3. Deduct newly submitted inventory quantities
+            // 3. Deduct newly submitted inventory quantities (From Technician Stock)
             if (!empty($partsData)) {
                 foreach ($partsData as $np) {
-                    $deduct = $pdo->prepare("UPDATE products SET current_stock = current_stock - ? WHERE id = ?");
-                    $deduct->execute([$np['qty'], $np['product_id']]);
+                    $deduct = $pdo->prepare("UPDATE technician_stock SET quantity = quantity - ? WHERE product_id = ? AND technician_id = ?");
+                    $deduct->execute([$np['qty'], $np['product_id'], $_SESSION['user_id']]);
                     
                     // Log Deduction Movement
                     $mov = $pdo->prepare("INSERT INTO stock_movements (product_id, type, quantity, notes) VALUES (?, 'Stock Out', ?, ?)");
-                    $mov->execute([$np['product_id'], $np['qty'], "Parts consumed for Ticket #$complaintId"]);
+                    $mov->execute([$np['product_id'], $np['qty'], "Parts consumed by Technician (Tech ID: {$_SESSION['user_id']}) for Ticket #$complaintId"]);
                 }
             }
 
-            $pdo->commit();
-            $success = "Job updated successfully! Inventory synchronized.";
-
-            // Auto-generate Invoice and record payment if status is Completed
-            if ($status === 'Completed' && isset($_POST['payment_method'])) {
-                $paymentMethod = $_POST['payment_method'];
+            // 4. Auto-generate Invoice and record payment if status is Completed
+            if ($status === 'Completed') {
+                $paymentMethod = $_POST['payment_method'] ?? 'Pay Later';
                 $paymentStatus = ($paymentMethod === 'Pay Later') ? 'Unpaid' : 'Paid';
                 
-                // Calculate Total from Parts Data
-                $grandTotal = 0;
+                // Calculate Total from Parts Data accurately
+                $baseTotal = 0;
+                $selectedSerials = $_POST['serial_ids'] ?? [];
+                $serialPrices = [];
+                
+                // 1. Get prices for all selected serials
+                if (!empty($selectedSerials)) {
+                    $placeholders = implode(',', array_fill(0, count($selectedSerials), '?'));
+                    $sStmt = $pdo->prepare("SELECT id, product_id, purchase_price FROM product_serials WHERE id IN ($placeholders)");
+                    $sStmt->execute($selectedSerials);
+                    while ($sRow = $sStmt->fetch()) {
+                        $baseTotal += (float)$sRow['purchase_price'];
+                        $serialPrices[$sRow['product_id']] = ($serialPrices[$sRow['product_id']] ?? 0) + 1;
+                    }
+                }
+
+                // 2. Add prices for remaining un-serialized quantities
                 if (!empty($partsData)) {
                     foreach ($partsData as $p) {
                         $pStmt = $pdo->prepare("SELECT unit_price FROM products WHERE id = ?");
                         $pStmt->execute([$p['product_id']]);
                         if ($prod = $pStmt->fetch()) {
-                            $grandTotal += ($prod['unit_price'] * $p['qty']);
+                            $serialsUsed = $serialPrices[$p['product_id']] ?? 0;
+                            $remainingQty = max(0, (int)$p['qty'] - $serialsUsed);
+                            
+                            if ($remainingQty > 0) {
+                                $baseTotal += ($prod['unit_price'] * $remainingQty);
+                            }
                         }
                     }
                 }
+
+                // 3. Apply GST logic
+                $gstSlab = (float)($_POST['gst_slab'] ?? 18);
+                $gstMode = $_POST['gst_mode'] ?? 'Exclusive';
+                
+                if ($gstMode === 'Inclusive') {
+                    $grandTotal = $baseTotal;
+                    $subtotal = $grandTotal / (1 + ($gstSlab / 100));
+                    $gstAmount = $grandTotal - $subtotal;
+                } else {
+                    $subtotal = $baseTotal;
+                    $gstAmount = $subtotal * ($gstSlab / 100);
+                    $grandTotal = $subtotal + $gstAmount;
+                }
                 
                 $invoiceNo = 'INV' . time() . rand(10, 99);
-                $ins = $pdo->prepare("INSERT INTO invoices (complaint_id, invoice_no, subtotal, gst_amount, grand_total, payment_status, payment_method) VALUES (?, ?, ?, ?, ?, ?, ?)");
-                $ins->execute([$complaintId, $invoiceNo, $grandTotal, 0, $grandTotal, $paymentStatus, $paymentMethod]);
+                $ins = $pdo->prepare("INSERT INTO invoices (complaint_id, invoice_no, subtotal, gst_amount, grand_total, payment_status, payment_method, gst_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+                $ins->execute([$complaintId, $invoiceNo, $subtotal, $gstAmount, $grandTotal, $paymentStatus, $paymentMethod, $gstMode]);
                 $invoiceId = $pdo->lastInsertId();
+
+                // 5. Update Serial Numbers to 'Sold' and link to Invoice
+                if (!empty($_POST['serial_ids'])) {
+                    $serialIds = $_POST['serial_ids'];
+                    foreach ($serialIds as $sid) {
+                        $sStmt = $pdo->prepare("SELECT id, purchase_price FROM product_serials WHERE id = ?");
+                        $sStmt->execute([$sid]);
+                        $sRow = $sStmt->fetch();
+                        $sPrice = (float)($sRow['purchase_price'] ?? 0);
+                        
+                        // Calculate individual taxable price for this serial
+                        if ($gstMode === 'Inclusive') {
+                            $sSalePrice = $sPrice / (1 + ($gstSlab / 100));
+                        } else {
+                            $sSalePrice = $sPrice;
+                        }
+                        
+                        $updSerial = $pdo->prepare("UPDATE product_serials SET status = 'Sold', sale_price = ?, invoice_id = ?, sold_at = CURRENT_TIMESTAMP WHERE id = ?");
+                        $updSerial->execute([$sSalePrice, $invoiceId, $sid]);
+                    }
+                }
 
                 // Record payment in ledger if it's not 'Pay Later'
                 if ($paymentStatus === 'Paid') {
@@ -160,6 +226,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 
                 $success .= " Invoice #$invoiceNo generated.";
             }
+
+            $pdo->commit();
+            $success .= " Job updated successfully! Inventory synchronized.";
 
         } catch (Exception $e) {
             $pdo->rollBack();
@@ -209,22 +278,71 @@ require_once '../includes/header.php';
 
         <!-- Parts Consumed -->
         <div class="bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
-            <label class="block text-sm font-bold text-slate-700 mb-4 uppercase tracking-wider">Parts Consumed</label>
-            <div id="parts-container" class="space-y-3">
-                <div class="flex gap-2 part-row">
-                    <select name="parts[]" onchange="calculateBill()" class="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-500 text-sm product-select">
-                        <option value="">-- Select Product --</option>
-                        <?php foreach ($products as $p): ?>
-                            <option value="<?php echo $p['id']; ?>"><?php echo htmlspecialchars($p['item_name']); ?> (₹<?php echo $p['unit_price']; ?>)</option>
-                        <?php endforeach; ?>
-                    </select>
-                    <input type="number" name="qtys[]" value="1" min="1" oninput="calculateBill()" class="w-20 bg-slate-50 border border-slate-200 rounded-xl px-3 py-3 text-center text-sm qty-input">
+            <div class="flex items-center justify-between mb-4">
+                <label class="block text-sm font-bold text-slate-700 uppercase tracking-wider">Parts Consumed</label>
+                <span class="text-[10px] font-black text-indigo-500 bg-indigo-50 px-2 py-1 rounded-lg uppercase">Inventory Link</span>
+            </div>
+            
+            <div id="parts-container" class="space-y-4">
+                <!-- Initial Row -->
+                <div class="p-4 bg-slate-50 border border-slate-100 rounded-2xl part-row group/row relative">
+                    <div class="flex gap-2 mb-3">
+                        <div class="flex-1 relative">
+                            <select name="parts[]" onchange="loadSerials(this); calculateBill();" class="w-full bg-white border border-slate-200 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-500 text-sm product-select appearance-none">
+                                <option value="">-- Select Product --</option>
+                                <?php foreach ($products as $p): ?>
+                                    <option value="<?php echo $p['id']; ?>" data-price="<?php echo $p['unit_price']; ?>"><?php echo htmlspecialchars($p['item_name']); ?> (₹<?php echo number_format($p['unit_price'], 2); ?>)</option>
+                                <?php endforeach; ?>
+                            </select>
+                            <div class="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
+                            </div>
+                        </div>
+                        <div class="w-24 relative">
+                            <input type="number" name="qtys[]" value="1" min="1" oninput="calculateBill()" class="w-full bg-white border border-slate-200 rounded-xl px-3 py-3 text-center text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500 qty-input">
+                            <span class="absolute -top-2 left-3 bg-white px-1 text-[8px] font-black text-slate-400 uppercase">Qty</span>
+                        </div>
+                    </div>
+                    
+                    <!-- Serial Numbers Selection -->
+                    <div class="serial-selection-area hidden mt-4 pt-4 border-t border-slate-200/50">
+                        <div class="flex items-center justify-between mb-3">
+                            <label class="block text-[10px] font-black text-slate-400 uppercase tracking-widest">Available Serials & Individual Pricing</label>
+                            <span class="text-[9px] font-bold text-indigo-400">Select to assign to this job</span>
+                        </div>
+                        <div class="serial-checkboxes grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto p-2 bg-white/50 rounded-xl">
+                            <!-- Serials will be loaded here -->
+                        </div>
+                    </div>
                 </div>
             </div>
-            <button type="button" onclick="addPartRow()" class="mt-4 text-xs font-bold text-indigo-600 hover:text-indigo-800 transition flex items-center gap-1">
+            
+            <button type="button" onclick="addPartRow()" class="mt-4 w-full py-3 border-2 border-dashed border-slate-200 rounded-2xl text-xs font-bold text-slate-400 hover:border-indigo-300 hover:text-indigo-500 hover:bg-indigo-50/30 transition flex items-center justify-center gap-2">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" /></svg>
-                Add Another Part
+                Add Another Product
             </button>
+        </div>
+
+        <!-- NEW: Selected Parts & Serials Breakdown Section -->
+        <div id="selection-summary-card" class="bg-indigo-900 text-white p-6 rounded-3xl shadow-xl hidden">
+            <div class="flex items-center justify-between mb-4 pb-4 border-b border-white/10">
+                <h3 class="text-sm font-black uppercase tracking-widest">Selected Inventory Breakdown</h3>
+                <span class="text-[10px] bg-white/10 px-2 py-1 rounded">Live Validation</span>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-left text-xs">
+                    <thead>
+                        <tr class="text-indigo-300 font-bold uppercase tracking-tighter border-b border-white/5">
+                            <th class="py-2">Item / Serial</th>
+                            <th class="py-2 text-right">Qty</th>
+                            <th class="py-2 text-right">Price (₹)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="summary-table-body" class="divide-y divide-white/5">
+                        <!-- Summary items will be injected here -->
+                    </tbody>
+                </table>
+            </div>
         </div>
 
         <!-- Billing Summary -->
@@ -245,27 +363,53 @@ require_once '../includes/header.php';
                 </div>
             </div>
 
-            <div id="payment-method-container" class="hidden pt-4 space-y-4">
-                <label class="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Select Payment Method</label>
-                <div class="grid grid-cols-2 gap-3">
-                    <label class="flex flex-col items-center justify-center p-3 border-2 border-white/10 rounded-2xl cursor-pointer hover:bg-white/5 transition has-[:checked]:bg-indigo-500 has-[:checked]:border-indigo-400">
-                        <input type="radio" name="payment_method" value="Cash" checked class="sr-only">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
-                        <span class="text-xs font-bold">Cash</span>
-                    </label>
-                    <label class="flex flex-col items-center justify-center p-3 border-2 border-white/10 rounded-2xl cursor-pointer hover:bg-white/5 transition has-[:checked]:bg-indigo-500 has-[:checked]:border-indigo-400">
-                        <input type="radio" name="payment_method" value="Bank" class="sr-only">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 14v3a2 2 0 002 2h4a2 2 0 002-2v-3m-10 0V8a2 2 0 012-2h4a2 2 0 012 2v6M4 18h16" /></svg>
-                        <span class="text-xs font-bold">Bank / QR</span>
-                    </label>
-                    <label class="flex flex-col items-center justify-center p-3 border-2 border-white/10 rounded-2xl cursor-pointer hover:bg-white/5 transition has-[:checked]:bg-indigo-500 has-[:checked]:border-indigo-400 col-span-2">
-                        <input type="radio" name="payment_method" value="Pay Later" class="sr-only">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                        <span class="text-xs font-bold uppercase tracking-widest">Pay Later</span>
-                    </label>
+            <!-- Payment & Billing (Visible only if status is Completed) -->
+        <div id="payment-method-container" class="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 <?php echo $complaint['status'] === 'Completed' ? '' : 'hidden'; ?>">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <!-- GST Settings -->
+                <div class="space-y-4">
+                    <label class="block text-sm font-bold text-slate-700 uppercase tracking-wider">GST Settings</label>
+                    <div class="grid grid-cols-2 gap-3">
+                        <div class="relative">
+                            <select name="gst_slab" id="gst_slab" onchange="calculateBill()" class="w-full bg-slate-800 border border-white/10 rounded-xl px-4 py-2 outline-none text-xs text-white appearance-none focus:ring-1 focus:ring-indigo-500">
+                                <option value="0" class="bg-slate-800 text-white">0% GST</option>
+                                <option value="5" class="bg-slate-800 text-white">5% GST</option>
+                                <option value="12" class="bg-slate-800 text-white">12% GST</option>
+                                <option value="18" selected class="bg-slate-800 text-white">18%</option>
+                                <option value="28" class="bg-slate-800 text-white">28%</option>
+                            </select>
+                            <span class="absolute -top-2 left-3 bg-slate-900 px-1 text-[8px] font-black text-slate-500 uppercase">Slab</span>
+                        </div>
+                        <div class="relative">
+                            <select name="gst_mode" id="gst_mode" onchange="calculateBill()" class="w-full bg-slate-800 border border-white/10 rounded-xl px-4 py-2 outline-none text-xs text-white appearance-none focus:ring-1 focus:ring-indigo-500">
+                                <option value="Exclusive" selected class="bg-slate-800 text-white">Exclusive</option>
+                                <option value="Inclusive" class="bg-slate-800 text-white">Inclusive</option>
+                            </select>
+                            <span class="absolute -top-2 left-3 bg-slate-900 px-1 text-[8px] font-black text-slate-500 uppercase">Mode</span>
+                        </div>
+                    </div>
                 </div>
-                <p class="text-[10px] text-slate-400 italic">Marking as 'Completed' will automatically generate the invoice.</p>
+
+                <!-- Payment Method -->
+                <div class="space-y-4">
+                    <label class="block text-sm font-bold text-slate-700 uppercase tracking-wider">Payment Method</label>
+                    <div class="grid grid-cols-2 gap-2">
+                        <label class="flex flex-col items-center justify-center p-3 border-2 border-slate-100 rounded-2xl cursor-pointer hover:bg-slate-50 transition has-[:checked]:bg-indigo-600 has-[:checked]:border-indigo-400 has-[:checked]:text-white">
+                            <input type="radio" name="payment_method" value="Cash" checked class="sr-only">
+                            <span class="text-xs font-bold uppercase tracking-tighter">Cash</span>
+                        </label>
+                        <label class="flex flex-col items-center justify-center p-3 border-2 border-slate-100 rounded-2xl cursor-pointer hover:bg-slate-50 transition has-[:checked]:bg-indigo-600 has-[:checked]:border-indigo-400 has-[:checked]:text-white">
+                            <input type="radio" name="payment_method" value="UPI" class="sr-only">
+                            <span class="text-xs font-bold uppercase tracking-tighter">UPI / QR</span>
+                        </label>
+                        <label class="flex flex-col items-center justify-center p-3 border-2 border-slate-100 rounded-2xl cursor-pointer hover:bg-slate-50 transition has-[:checked]:bg-slate-900 has-[:checked]:border-slate-800 has-[:checked]:text-white col-span-2">
+                            <input type="radio" name="payment_method" value="Pay Later" class="sr-only">
+                            <span class="text-xs font-bold uppercase tracking-widest">Pay Later (Credit)</span>
+                        </label>
+                    </div>
+                </div>
             </div>
+            <p class="mt-6 text-[10px] text-slate-400 italic text-center">Invoices are generated using the selected tax slab and pricing model.</p>
         </div>
 
         <!-- Photos -->
@@ -324,19 +468,165 @@ function updateUI() {
 
 function calculateBill() {
     const rows = document.querySelectorAll('.part-row');
+    const summaryBody = document.getElementById('summary-table-body');
+    const summaryCard = document.getElementById('selection-summary-card');
     let total = 0;
+    let summaryHtml = '';
 
     rows.forEach(row => {
-        const productId = row.querySelector('.product-select').value;
-        const qty = parseInt(row.querySelector('.qty-input').value) || 0;
+        const productSelect = row.querySelector('.product-select');
+        const productId = productSelect.value;
+        const productName = productSelect.options[productSelect.selectedIndex]?.text.split(' (₹')[0] || '';
+        const qtyInput = row.querySelector('.qty-input');
+        const qty = parseInt(qtyInput.value) || 0;
         
         if (productId && productPrices[productId]) {
-            total += (productPrices[productId] * qty);
+            let rowTotal = 0;
+            const selectedSerials = row.querySelectorAll('.serial-checkbox:checked');
+            
+            // If serials are selected, their individual prices take precedence
+            if (selectedSerials.length > 0) {
+                selectedSerials.forEach(checkbox => {
+                    const serialLabel = checkbox.closest('label');
+                    const serialNumber = serialLabel.querySelector('.serial-no-text').innerText;
+                    const serialPrice = parseFloat(serialLabel.getAttribute('data-price')) || 0;
+                    
+                    rowTotal += serialPrice;
+                    
+                    summaryHtml += `
+                        <tr class="text-indigo-300 italic border-l-2 border-indigo-500/30">
+                            <td class="py-1 pl-4">└ SN: ${serialNumber}</td>
+                            <td class="py-1 text-right">1</td>
+                            <td class="py-1 text-right text-[10px]">₹${serialPrice.toFixed(2)}</td>
+                        </tr>
+                    `;
+                });
+
+                // If qty > serials selected, add the remaining using product unit price
+                const remainingQty = qty - selectedSerials.length;
+                if (remainingQty > 0) {
+                    const remainingTotal = remainingQty * productPrices[productId];
+                    rowTotal += remainingTotal;
+                    summaryHtml = `
+                        <tr class="font-bold border-t border-white/5">
+                            <td class="py-3">${productName} (Un-serialized)</td>
+                            <td class="py-3 text-right">x${remainingQty}</td>
+                            <td class="py-3 text-right">₹${remainingTotal.toFixed(2)}</td>
+                        </tr>
+                    ` + summaryHtml;
+                } else {
+                    // Just the header for grouped serials
+                    summaryHtml = `
+                        <tr class="font-bold border-t border-white/5">
+                            <td class="py-3" colspan="2">${productName}</td>
+                            <td class="py-3 text-right">₹${rowTotal.toFixed(2)}</td>
+                        </tr>
+                    ` + summaryHtml;
+                }
+            } else {
+                // No serials selected, use product unit price
+                rowTotal = productPrices[productId] * qty;
+                summaryHtml += `
+                    <tr class="font-bold border-t border-white/5">
+                        <td class="py-3">${productName}</td>
+                        <td class="py-3 text-right">x${qty}</td>
+                        <td class="py-3 text-right">₹${rowTotal.toFixed(2)}</td>
+                    </tr>
+                `;
+            }
+            
+            total += rowTotal;
         }
     });
 
-    document.getElementById('parts-total').innerText = total.toFixed(2);
-    document.getElementById('grand-total').innerText = total.toFixed(2);
+    if (total > 0) {
+        summaryCard.classList.remove('hidden');
+        
+        const gstSlab = parseFloat(document.getElementById('gst_slab').value) || 0;
+        const gstMode = document.getElementById('gst_mode').value;
+        
+        let taxableTotal = 0;
+        let gstAmount = 0;
+        let grandTotal = 0;
+
+        if (gstMode === 'Inclusive') {
+            grandTotal = total;
+            taxableTotal = grandTotal / (1 + (gstSlab / 100));
+            gstAmount = grandTotal - taxableTotal;
+        } else {
+            taxableTotal = total;
+            gstAmount = taxableTotal * (gstSlab / 100);
+            grandTotal = taxableTotal + gstAmount;
+        }
+
+        summaryHtml += `
+            <tr class="border-t border-white/20">
+                <td class="py-2 text-slate-400 text-xs">Subtotal</td>
+                <td colspan="2" class="py-2 text-right text-xs">₹${taxableTotal.toFixed(2)}</td>
+            </tr>
+            <tr>
+                <td class="py-2 text-slate-400 text-xs">GST (${gstSlab}%)</td>
+                <td colspan="2" class="py-2 text-right text-xs">₹${gstAmount.toFixed(2)}</td>
+            </tr>
+        `;
+
+        summaryBody.innerHTML = summaryHtml;
+        document.getElementById('parts-total').innerText = taxableTotal.toFixed(2);
+        document.getElementById('grand-total').innerText = grandTotal.toFixed(2);
+    } else {
+        summaryCard.classList.add('hidden');
+    }
+}
+
+async function loadSerials(selectEl) {
+    const row = selectEl.closest('.part-row');
+    const productId = selectEl.value;
+    const serialArea = row.querySelector('.serial-selection-area');
+    const serialContainer = row.querySelector('.serial-checkboxes');
+    
+    if (!productId) {
+        serialArea.classList.add('hidden');
+        calculateBill();
+        return;
+    }
+
+    try {
+        const response = await fetch(`../admin/accounts/ajax_get_serials.php?product_id=${productId}`);
+        const serials = await response.json();
+
+        if (serials && serials.length > 0) {
+            serialArea.classList.remove('hidden');
+            serialContainer.innerHTML = '';
+            
+            serials.forEach(s => {
+                const label = document.createElement('label');
+                label.className = 'flex items-center justify-between p-3 rounded-xl bg-white border border-slate-100 hover:border-indigo-200 hover:bg-indigo-50/50 cursor-pointer transition group/serial shadow-sm';
+                
+                // Use purchase_price as the display price as per user request ("prices given by the admin")
+                const displayPrice = parseFloat(s.purchase_price) || 0;
+                label.setAttribute('data-price', displayPrice);
+                
+                label.innerHTML = `
+                    <div class="flex items-center gap-3">
+                        <input type="checkbox" name="serial_ids[]" value="${s.id}" onchange="calculateBill()" class="w-5 h-5 text-indigo-600 rounded-lg border-slate-300 focus:ring-indigo-500 transition cursor-pointer serial-checkbox">
+                        <div class="flex flex-col">
+                            <span class="text-xs font-black text-slate-700 serial-no-text">${s.serial_number}</span>
+                        </div>
+                    </div>
+                    <div class="text-right">
+                        <span class="block text-xs font-black text-indigo-600">₹${displayPrice.toLocaleString('en-IN', {minimumFractionDigits: 2})}</span>
+                        <span class="block text-[8px] font-bold text-slate-300 uppercase tracking-tighter">Admin Price</span>
+                    </div>
+                `;
+                serialContainer.appendChild(label);
+            });
+        } else {
+            serialArea.classList.add('hidden');
+        }
+        calculateBill();
+    } catch (error) {
+        console.error('Error fetching serials:', error);
+    }
 }
 
 function addPartRow() {
@@ -345,6 +635,8 @@ function addPartRow() {
     const newRow = firstRow.cloneNode(true);
     newRow.querySelector('.product-select').value = "";
     newRow.querySelector('.qty-input').value = "1";
+    newRow.querySelector('.serial-selection-area').classList.add('hidden');
+    newRow.querySelector('.serial-checkboxes').innerHTML = '';
     container.appendChild(newRow);
     calculateBill();
 }

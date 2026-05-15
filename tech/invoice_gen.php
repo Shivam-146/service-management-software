@@ -32,28 +32,51 @@ try {
     $companyAddress = !empty($adminSettings['address']) ? nl2br(htmlspecialchars($adminSettings['address'])) : 'Tech Hub, Sector 5';
     $companyPhone = !empty($adminSettings['phone']) ? $adminSettings['phone'] : '+91 98765 43210';
 
-    // Parse parts consumed
-    $partsConsumed = json_decode($complaint['parts_consumed'], true) ?? [];
+    // 1. Fetch Serials linked to this invoice to get accurate individual pricing
+    $sStmt = $pdo->prepare("SELECT serial_number, purchase_price, product_id FROM product_serials WHERE invoice_id = (SELECT id FROM invoices WHERE complaint_id = ? LIMIT 1)");
+    $sStmt->execute([$complaintId]);
+    $serials = $sStmt->fetchAll();
     
-    // Fetch current product details for the consumed parts to get accurate pricing
     $lines = [];
-    $subtotal = 0; // Standard Service Fee removed
-    
-    if (!empty($partsConsumed)) {
-        foreach ($partsConsumed as $part) {
+    $subtotal = 0;
+    $serialCountByProduct = [];
+
+    // Add serials to lines
+    foreach ($serials as $s) {
+        $pStmt = $pdo->prepare("SELECT product_name FROM products WHERE id = ?");
+        $pStmt->execute([$s['product_id']]);
+        $pName = $pStmt->fetchColumn() ?: "Unknown Product";
+        
+        $price = (float)$s['purchase_price'];
+        $lines[] = [
+            'name' => $pName . " (SN: " . $s['serial_number'] . ")",
+            'price' => $price,
+            'qty' => 1,
+            'total' => $price
+        ];
+        $subtotal += $price;
+        $serialCountByProduct[$s['product_id']] = ($serialCountByProduct[$s['product_id']] ?? 0) + 1;
+    }
+
+    // 2. Add remaining parts (non-serialized) from parts_consumed JSON
+    $partsConsumed = json_decode($complaint['parts_consumed'], true) ?? [];
+    foreach ($partsConsumed as $part) {
+        $pid = $part['product_id'];
+        $qty = (int)$part['qty'];
+        $serialsUsed = $serialCountByProduct[$pid] ?? 0;
+        $remainingQty = max(0, $qty - $serialsUsed);
+
+        if ($remainingQty > 0) {
             $pStmt = $pdo->prepare("SELECT product_name, unit_price FROM products WHERE id = ?");
-            $pStmt->execute([$part['product_id']]);
+            $pStmt->execute([$pid]);
             $product = $pStmt->fetch();
-            
             if ($product) {
-                $qty = $part['qty'] ?? 1;
-                $price = $product['unit_price'];
-                $total = $qty * $price;
-                
+                $price = (float)$product['unit_price'];
+                $total = $remainingQty * $price;
                 $lines[] = [
-                    'name' => $product['product_name'],
+                    'name' => $product['product_name'] . " (Un-serialized)",
                     'price' => $price,
-                    'qty' => $qty,
+                    'qty' => $remainingQty,
                     'total' => $total
                 ];
                 $subtotal += $total;
@@ -61,8 +84,35 @@ try {
         }
     }
 
-    $gst = $subtotal * 0.18;
-    $grandTotal = $subtotal + $gst;
+    // 3. Use GST and Total from the Invoice table (don't re-calculate at hardcoded 18%)
+    $invStmt = $pdo->prepare("SELECT subtotal, gst_amount, grand_total, gst_mode FROM invoices WHERE complaint_id = ?");
+    $invStmt->execute([$complaintId]);
+    $invoiceData = $invStmt->fetch();
+
+    if ($invoiceData) {
+        $dbSubtotal = (float)$invoiceData['subtotal'];
+        $gst = (float)$invoiceData['gst_amount'];
+        $grandTotal = (float)$invoiceData['grand_total'];
+        $gstMode = $invoiceData['gst_mode'] ?: 'Exclusive';
+        
+        // Calculate the effective rate
+        $effectiveRate = ($dbSubtotal > 0) ? ($gst / $dbSubtotal) : 0;
+
+        // If Inclusive, we need to show the taxable (pre-tax) price for each line to be consistent
+        if ($gstMode === 'Inclusive' && $effectiveRate > 0) {
+            foreach ($lines as &$line) {
+                $line['price'] = $line['price'] / (1 + $effectiveRate);
+                $line['total'] = $line['qty'] * $line['price'];
+            }
+        }
+        
+        // Use database subtotal for final display
+        $subtotal = $dbSubtotal;
+    } else {
+        $gst = 0;
+        $grandTotal = $subtotal;
+        $gstMode = 'Exclusive';
+    }
 
 } catch (PDOException $e) {
     die("Error: " . $e->getMessage());
@@ -155,12 +205,15 @@ $isPrint = isset($_GET['print']);
                 <span class="text-slate-800 font-bold">₹<?php echo number_format($subtotal, 2); ?></span>
             </div>
             <div class="flex justify-between text-sm">
-                <span class="text-slate-500">GST (18%):</span>
-                <span class="text-slate-800 font-bold">₹<?php echo number_format($subtotal * 0.18, 2); ?></span>
+                <?php 
+                    $gstRateDisplay = ($subtotal > 0) ? round(($gst / $subtotal) * 100) : 0;
+                ?>
+                <span class="text-slate-500">GST (<?php echo $gstRateDisplay; ?>%):</span>
+                <span class="text-slate-800 font-bold">₹<?php echo number_format($gst, 2); ?></span>
             </div>
             <div class="pt-4 border-t-2 border-indigo-600 flex justify-between items-center text-xl">
                 <span class="font-black text-slate-800 uppercase tracking-wider">Grand Total:</span>
-                <span class="font-black text-indigo-600">₹<?php echo number_format($subtotal * 1.18, 2); ?></span>
+                <span class="font-black text-indigo-600">₹<?php echo number_format($grandTotal, 2); ?></span>
             </div>
         </div>
     </div>
