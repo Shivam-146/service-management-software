@@ -11,7 +11,7 @@ if (!$purchase_id) {
 
 try {
     // Fetch items for this purchase
-    $stmt = $pdo->prepare("SELECT pi.product_id, p.item_name, pi.unit_price, pi.qty 
+    $stmt = $pdo->prepare("SELECT pi.product_id, p.product_name as item_name, pi.taxable_value as unit_price, pi.quantity as qty 
                            FROM purchase_items pi 
                            JOIN products p ON pi.product_id = p.id 
                            WHERE pi.purchase_id = ?");

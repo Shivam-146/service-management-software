@@ -11,6 +11,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_sale'])) {
     $paymentMethod = $_POST['payment_method'] ?? 'Cash';
     $paymentStatus = ($paymentMethod === 'Pay Later') ? 'Unpaid' : 'Paid';
     $remarks = $_POST['remarks'] ?? '';
+    $billNo = $_POST['bill_no'] ?? '';
+    $saleDate = $_POST['sale_date'] ?? date('Y-m-d H:i:s');
 
     if (!$customerId) {
         $error = "Please select a customer.";
@@ -18,98 +20,98 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_sale'])) {
         try {
             $pdo->beginTransaction();
 
-            // 1. Calculate Total accurately on backend
             $grandTotal = 0;
-            $selectedSerialIds = $_POST['serial_ids'] ?? [];
-            $allParts = $_POST['parts'] ?? [];
-            $allQtys = $_POST['qtys'] ?? [];
-            $serialCounts = [];
-
-            // Add prices of selected serials
-            if (!empty($selectedSerialIds)) {
-                $placeholders = implode(',', array_fill(0, count($selectedSerialIds), '?'));
-                $sStmt = $pdo->prepare("SELECT id, product_id, purchase_price FROM product_serials WHERE id IN ($placeholders)");
-                $sStmt->execute($selectedSerialIds);
-                $gstSlab = (float)($_POST['gst_slab'] ?? 18);
-                $gstMode = $_POST['gst_mode'] ?? 'Exclusive';
-
-                while ($sRow = $sStmt->fetch()) {
-                    $itemPrice = (float)$sRow['purchase_price'];
-                    
-                    // Calculate individual taxable price for this serial
-                    if ($gstMode === 'Inclusive') {
-                        $itemSalePrice = $itemPrice / (1 + ($gstSlab / 100));
-                    } else {
-                        $itemSalePrice = $itemPrice;
-                    }
-
-                    $grandTotal += $itemPrice;
-                    $serialCounts[$sRow['product_id']] = ($serialCounts[$sRow['product_id']] ?? 0) + 1;
-                    
-                    // Update serial status and record sale price
-                    $updSerial = $pdo->prepare("UPDATE product_serials SET status = 'Sold', sale_price = ?, sold_at = CURRENT_TIMESTAMP WHERE id = ?");
-                    $updSerial->execute([$itemSalePrice, $sRow['id']]);
-                }
-            }
-
-            // Process Products and remaining stock deductions
-            foreach ($allParts as $idx => $pid) {
-                if (empty($pid)) continue;
-                $qty = (int)$allQtys[$idx];
-                
-                // Fetch product default price for un-serialized quantity
-                $pStmt = $pdo->prepare("SELECT unit_price FROM products WHERE id = ?");
-                $pStmt->execute([$pid]);
-                $unitPrice = $pStmt->fetchColumn() ?: 0;
-                
-                $serialsUsed = $serialCounts[$pid] ?? 0;
-                $unserializedQty = max(0, $qty - $serialsUsed);
-                
-                if ($unserializedQty > 0) {
-                    $grandTotal += ($unitPrice * $unserializedQty);
-                }
-
-                // Deduct total stock
-                $updStock = $pdo->prepare("UPDATE products SET current_stock = current_stock - ? WHERE id = ?");
-                $updStock->execute([$qty, $pid]);
-                
-                // Log movement
-                $mov = $pdo->prepare("INSERT INTO stock_movements (product_id, type, quantity, notes) VALUES (?, 'Stock Out', ?, ?)");
-                $mov->execute([$pid, $qty, "Direct Sale to Customer ID #$customerId"]);
-            }
-
-            // 3. Create Invoice
-            $gstSlab = (float)($_POST['gst_slab'] ?? 18);
-            $gstMode = $_POST['gst_mode'] ?? 'Exclusive';
+            $totalSubtotal = 0;
+            $totalGst = 0;
             
-            if ($gstMode === 'Inclusive') {
-                $subtotal = $grandTotal / (1 + ($gstSlab / 100));
-                $gstAmount = $grandTotal - $subtotal;
-            } else {
-                $subtotal = $grandTotal;
-                $gstAmount = $subtotal * ($gstSlab / 100);
-                $grandTotal = $subtotal + $gstAmount;
+            $product_ids = $_POST['parts'] ?? [];
+            $quantities = $_POST['qtys'] ?? [];
+            $prices = $_POST['price'] ?? [];
+            $gst_slabs = $_POST['gst_slab'] ?? [];
+            $gst_modes = $_POST['row_gst_mode'] ?? []; // Row level GST mode
+            $taxable_values = $_POST['taxable_value'] ?? [];
+            $gst_amounts = $_POST['gst_amount'] ?? [];
+            $disc_types = $_POST['discount_type'] ?? [];
+            $disc_vals = $_POST['discount_val'] ?? [];
+            $disc_amts = $_POST['discount_amount'] ?? [];
+            $row_totals = $_POST['row_total'] ?? [];
+            $selectedSerialIds = $_POST['serial_ids'] ?? [];
+
+            if (empty($product_ids)) throw new Exception("Please add at least one product.");
+
+            foreach ($row_totals as $row_total) {
+                $grandTotal += (float)$row_total;
+            }
+            foreach ($taxable_values as $taxable) {
+                $totalSubtotal += (float)$taxable;
+            }
+            foreach ($gst_amounts as $gst_amt) {
+                $totalGst += (float)$gst_amt;
             }
 
-            $invoiceNo = 'SALE' . time() . rand(10, 99);
-            $ins = $pdo->prepare("INSERT INTO invoices (invoice_no, subtotal, gst_amount, grand_total, payment_status, payment_method, gst_mode) VALUES (?, ?, ?, ?, ?, ?, ?)");
-            $ins->execute([$invoiceNo, $subtotal, $gstAmount, $grandTotal, $paymentStatus, $paymentMethod, $gstMode]);
+            // 1. Create Invoice
+            $invoiceNo = $billNo ?: ('SALE' . time());
+            // Store the first row's mode as global mode for legacy reasons or UI default
+            $globalGstMode = $gst_modes[0] ?? 'Exclusive';
+            
+            $ins = $pdo->prepare("INSERT INTO invoices (invoice_no, customer_id, subtotal, gst_amount, grand_total, payment_status, payment_method, gst_mode, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $ins->execute([$invoiceNo, $customerId, $totalSubtotal, $totalGst, $grandTotal, $paymentStatus, $paymentMethod, $globalGstMode, $saleDate]);
             $invoiceId = $pdo->lastInsertId();
 
-            // 4. Link Serials to Invoice
-            foreach ($selectedSerialIds as $sid) {
-                $link = $pdo->prepare("UPDATE product_serials SET invoice_id = ? WHERE id = ?");
-                $link->execute([$invoiceId, $sid]);
+            // 2. Insert Invoice Items
+            foreach ($product_ids as $index => $pid) {
+                if (empty($pid)) continue;
+                
+                $qty = (int)$quantities[$index];
+                $price = (float)$prices[$index];
+                $gst_rate = (float)$gst_slabs[$index];
+                $gst_mode = $gst_modes[$index] ?? 'Exclusive';
+                $taxable_val = (float)$taxable_values[$index];
+                $gst_amt = (float)$gst_amounts[$index];
+                $disc_type = $disc_types[$index];
+                $disc_val = (float)$disc_vals[$index];
+                $disc_amt = (float)$disc_amts[$index];
+                $total = (float)$row_totals[$index];
+
+                $stmt = $pdo->prepare("INSERT INTO invoice_items (invoice_id, product_id, quantity, unit_price, taxable_value, gst_rate, gst_amount, gst_mode, discount_type, discount_value, discount_amount, total_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $stmt->execute([$invoiceId, $pid, $qty, $price, $taxable_val, $gst_rate, $gst_amt, $gst_mode, $disc_type, $disc_val, $disc_amt, $total]);
+
+                // Update stock
+                $updStock = $pdo->prepare("UPDATE products SET current_stock = current_stock - ? WHERE id = ?");
+                $updStock->execute([$qty, $pid]);
+
+                $mvmt = $pdo->prepare("INSERT INTO stock_movements (product_id, type, quantity, notes) VALUES (?, 'Stock Out', ?, ?)");
+                $mvmt->execute([$pid, $qty, "Direct Sale Bill #$invoiceNo"]);
             }
 
-            // 5. Record Payment
-            if ($paymentStatus === 'Paid') {
+            // 3. Link Serials
+            if (!empty($selectedSerialIds)) {
+                $placeholders = implode(',', array_fill(0, count($selectedSerialIds), '?'));
+                $link = $pdo->prepare("UPDATE product_serials SET invoice_id = ?, status = 'Sold', sold_at = CURRENT_TIMESTAMP WHERE id IN ($placeholders)");
+                $params = array_merge([$invoiceId], $selectedSerialIds);
+                $link->execute($params);
+            }
+
+            // 4. Record Payment or Outflow (for Credit)
+            if ($paymentMethod === 'Pay Later') {
+                // Add to Outflow (Purchases table as an expense type)
+                $custData = $pdo->prepare("SELECT customer_name FROM customers WHERE id = ?");
+                $custData->execute([$customerId]);
+                $custName = $custData->fetchColumn();
+                
+                $outflow = $pdo->prepare("INSERT INTO purchases (purchase_date, payee_name, category, subtotal, gst_amount, total_amount, payment_method, is_inventory, notes) VALUES (?, ?, 'Credit Sale', ?, ?, ?, 'Pay Later', 0, ?)");
+                $outflow->execute([date('Y-m-d', strtotime($saleDate)), $custName, $totalSubtotal, $totalGst, $grandTotal, "Credit sale for Invoice #$invoiceNo"]);
+                
+                // Add to Customer Due
+                $updDue = $pdo->prepare("UPDATE customers SET due_amount = due_amount + ? WHERE id = ?");
+                $updDue->execute([$grandTotal, $customerId]);
+            } else {
                 $payStmt = $pdo->prepare("INSERT INTO payments (customer_id, invoice_id, payment_date, amount, payment_method, notes) VALUES (?, ?, ?, ?, ?, ?)");
-                $payStmt->execute([$customerId, $invoiceId, date('Y-m-d H:i:s'), $grandTotal, $paymentMethod, "Payment for Direct Sale #$invoiceNo. $remarks"]);
+                $payStmt->execute([$customerId, $invoiceId, $saleDate, $grandTotal, $paymentMethod, "Direct Sale #$invoiceNo. $remarks"]);
             }
 
             $pdo->commit();
-            $success = "Sale recorded successfully! <a href='invoice_gen.php?id=$invoiceId' class='underline font-black ml-2'>View Invoice #$invoiceNo</a>";
+            $success = "Sale recorded successfully! <a href='invoice_gen.php?id=$invoiceId' class='underline font-bold ml-2'>View Invoice #$invoiceNo</a>";
             
         } catch (Exception $e) {
             $pdo->rollBack();
@@ -118,255 +120,332 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_sale'])) {
     }
 }
 
-// Fetch initial data
+// Fetch Data
 $customers = $pdo->query("SELECT id, customer_name, phone FROM customers ORDER BY customer_name ASC")->fetchAll();
-$productsRes = $pdo->query("SELECT id, product_name, unit_price FROM products WHERE current_stock > 0 ORDER BY product_name ASC");
-$products = $productsRes->fetchAll();
+$productsRes = $pdo->query("SELECT p.id, p.product_name, p.gst_rate,
+                            (SELECT pi.taxable_value FROM purchase_items pi WHERE pi.product_id = p.id ORDER BY pi.id DESC LIMIT 1) as latest_purchase_price
+                            FROM products p ORDER BY p.product_name ASC")->fetchAll();
+$productData = [];
+foreach ($productsRes as $p) {
+    $productData[$p['id']] = ['price' => (float)$p['latest_purchase_price'], 'gst' => (float)$p['gst_rate']];
+}
 
-$priceMap = [];
-foreach ($products as $p) { $priceMap[$p['id']] = $p['unit_price']; }
+$recentSales = $pdo->query("SELECT i.*, c.customer_name FROM invoices i 
+    LEFT JOIN payments p ON i.id = p.invoice_id
+    LEFT JOIN customers c ON p.customer_id = c.id
+    GROUP BY i.id
+    ORDER BY i.created_at DESC LIMIT 20")->fetchAll();
 
 require_once '../../includes/header.php';
 ?>
 
-<div class="max-w-4xl mx-auto space-y-6">
-    <div class="flex items-center justify-between">
-        <div>
-            <h2 class="text-2xl font-black text-slate-800 tracking-tight">Direct Sales Entry</h2>
-            <p class="text-xs font-bold text-slate-400 uppercase tracking-widest">Create instant invoices for direct sales</p>
-        </div>
-        <a href="index.php" class="p-2 bg-white border border-slate-200 rounded-xl text-slate-400 hover:text-indigo-600 transition shadow-sm">
-             <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+<div class="space-y-6">
+    <div class="flex items-center gap-4">
+        <a href="index.php" class="p-2 bg-white border border-slate-200 rounded-none text-slate-500 hover:text-indigo-600 transition shadow-none">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
         </a>
+        <h1 class="text-2xl font-bold text-slate-800">New Direct Sale Entry</h1>
     </div>
 
     <?php if ($success): ?>
-        <div class="bg-emerald-100 border border-emerald-200 text-emerald-700 px-4 py-3 rounded-2xl animate-pulse"><?php echo $success; ?></div>
+        <div class="bg-emerald-100 border border-emerald-200 text-emerald-700 px-4 py-3 rounded-none"><?php echo $success; ?></div>
     <?php endif; ?>
     <?php if ($error): ?>
-        <div class="bg-rose-100 border border-rose-200 text-rose-700 px-4 py-3 rounded-2xl"><?php echo $error; ?></div>
+        <div class="bg-rose-100 border border-rose-200 text-rose-700 px-4 py-3 rounded-none"><?php echo $error; ?></div>
     <?php endif; ?>
 
-    <form method="POST" id="sales-form" class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <!-- Left: Sale Details -->
-        <div class="lg:col-span-2 space-y-6">
-            <!-- Customer Selection -->
-            <div class="bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
-                <div class="flex items-center justify-between mb-4">
-                    <label class="block text-xs font-black text-slate-400 uppercase tracking-widest">Customer Details</label>
-                    <button type="button" onclick="openCustomerModal()" class="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 transition uppercase tracking-tighter">+ Add New Customer</button>
+    <div class="grid grid-cols-1 lg:grid-cols-4 gap-8">
+        <!-- Entry Form -->
+        <div class="lg:col-span-3">
+            <form method="POST" id="sales-form" class="bg-white rounded-none border border-slate-100 shadow-none overflow-hidden">
+                <div class="p-6 border-b border-slate-50 bg-slate-50/50 flex justify-between items-center">
+                    <h2 class="text-lg font-bold text-slate-800">Sale Details</h2>
+                    <div class="text-[10px] font-black text-indigo-600 uppercase tracking-widest bg-indigo-50 px-3 py-1 border border-indigo-100">Direct Invoice</div>
                 </div>
-                <select name="customer_id" id="customer_select" required class="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-500 text-sm appearance-none">
-                    <option value="">-- Select Customer --</option>
-                    <?php foreach ($customers as $c): ?>
-                        <option value="<?php echo $c['id']; ?>"><?php echo htmlspecialchars($c['customer_name']); ?> (<?php echo $c['phone']; ?>)</option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-
-            <!-- Products Selection -->
-            <div class="bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
-                <label class="block text-xs font-black text-slate-400 uppercase tracking-widest mb-4">Items for Sale</label>
-                <div id="parts-container" class="space-y-4">
-                    <div class="p-4 bg-slate-50 border border-slate-100 rounded-2xl part-row group/row">
-                        <div class="flex gap-2 mb-3">
-                            <select name="parts[]" onchange="loadSerials(this); calculateBill();" class="flex-1 bg-white border border-slate-200 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-500 text-sm product-select">
-                                <option value="">-- Select Product --</option>
-                                <?php foreach ($products as $p): ?>
-                                    <option value="<?php echo $p['id']; ?>"><?php echo htmlspecialchars($p['product_name']); ?> (₹<?php echo number_format($p['unit_price'], 2); ?>)</option>
+                
+                <div class="p-6 space-y-6">
+                    <!-- Customer Selection -->
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <div class="flex justify-between items-center mb-1">
+                                <label class="block text-[10px] font-bold text-slate-400 uppercase">Customer Information</label>
+                                <button type="button" onclick="openCustomerModal()" class="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 uppercase">+ Add New</button>
+                            </div>
+                            <select name="customer_id" id="customer_select" required class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                                <option value="">Select Customer</option>
+                                <?php foreach ($customers as $c): ?>
+                                    <option value="<?php echo $c['id']; ?>"><?php echo htmlspecialchars($c['customer_name']); ?> (<?php echo $c['phone']; ?>)</option>
                                 <?php endforeach; ?>
                             </select>
-                            <div class="w-24 relative">
-                                <input type="number" name="qtys[]" value="1" min="1" oninput="calculateBill()" class="w-full bg-white border border-slate-200 rounded-xl px-3 py-3 text-center text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500 qty-input">
-                                <span class="absolute -top-2 left-2 bg-white px-1 text-[8px] font-black text-slate-400 uppercase">Qty</span>
-                            </div>
                         </div>
-                        <div class="serial-selection-area hidden mt-4 pt-4 border-t border-slate-200/50">
-                            <label class="block text-[10px] font-black text-slate-400 uppercase mb-2">Assign Serial Numbers</label>
-                            <div class="serial-checkboxes grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto pr-1"></div>
+                        <div>
+                            <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Billing Date</label>
+                            <input type="datetime-local" name="sale_date" value="<?php echo date('Y-m-d\TH:i'); ?>" class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
                         </div>
                     </div>
-                </div>
-                <button type="button" onclick="addPartRow()" class="mt-4 w-full py-3 border-2 border-dashed border-slate-100 rounded-2xl text-[10px] font-black text-slate-400 hover:border-indigo-200 hover:text-indigo-500 transition uppercase tracking-widest">+ Add Another Item</button>
-            </div>
-            
-            <div class="bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
-                <label class="block text-xs font-black text-slate-400 uppercase tracking-widest mb-2">Sale Remarks</label>
-                <textarea name="remarks" rows="2" class="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-indigo-500 transition" placeholder="Enter any specific notes for this transaction..."></textarea>
-            </div>
-        </div>
 
-        <!-- Right: Summary & Checkout -->
-        <div class="space-y-6">
-            <div class="bg-slate-900 text-white p-8 rounded-3xl shadow-xl shadow-slate-200 sticky top-6">
-                <div class="flex justify-between items-center pb-4 border-b border-white/10 mb-6">
-                    <span class="text-slate-400 font-bold uppercase tracking-widest text-xs">Checkout Summary</span>
-                    <div class="flex items-center gap-1">
-                        <span class="w-2 h-2 bg-emerald-500 rounded-full animate-ping"></span>
-                        <span class="text-[10px] font-black">ACTIVE</span>
+                    <!-- Items Section -->
+                    <div class="space-y-4">
+                        <div class="flex justify-between items-center">
+                            <label class="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Sale Items</label>
+                        </div>
+
+                        <div id="parts-container" class="space-y-4">
+                             <!-- Header Row -->
+                             <div class="hidden md:grid grid-cols-12 gap-2 px-4 mb-1">
+                                <div class="col-span-3"><label class="text-[9px] font-black text-slate-400 uppercase">Product Description</label></div>
+                                <div class="col-span-1 text-center"><label class="text-[9px] font-black text-slate-400 uppercase">Qty</label></div>
+                                <div class="col-span-2"><label class="text-[9px] font-black text-slate-400 uppercase">Selling Price</label></div>
+                                <div class="col-span-2"><label class="text-[9px] font-black text-slate-400 uppercase">Discount</label></div>
+                                <div class="col-span-2"><label class="text-[9px] font-black text-slate-400 uppercase">GST Type / Slab</label></div>
+                                <div class="col-span-2 text-right"><label class="text-[9px] font-black text-slate-400 uppercase">Total</label></div>
+                            </div>
+
+                            <!-- Item Row -->
+                            <div class="p-4 bg-slate-50 border border-slate-100 rounded-none part-row relative group">
+                                <div class="grid grid-cols-1 md:grid-cols-12 gap-2 items-start">
+                                    <!-- Product -->
+                                    <div class="md:col-span-3">
+                                        <select name="parts[]" onchange="loadSerials(this); updatePriceFromSelection(this); calculateRow(this);" class="w-full bg-white border border-slate-200 rounded-none px-2 py-2 text-xs font-bold product-select">
+                                            <option value="">-- Product --</option>
+                                            <?php foreach ($productsRes as $p): ?>
+                                                <option value="<?php echo $p['id']; ?>" data-price="<?php echo $p['latest_purchase_price']; ?>" data-gst="<?php echo $p['gst_rate']; ?>"><?php echo htmlspecialchars($p['product_name']); ?> (₹<?php echo number_format($p['latest_purchase_price'] ?? 0, 2); ?>)</option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                        <div class="mt-1 flex items-center gap-2 px-1">
+                                            <span class="text-[8px] font-black text-slate-400 uppercase">Purchase Cost:</span>
+                                            <span class="text-[9px] font-black text-indigo-600 purchase-cost-label">₹0.00</span>
+                                        </div>
+                                    </div>
+                                    <!-- Qty -->
+                                    <div class="md:col-span-1">
+                                        <input type="number" name="qtys[]" value="1" min="1" oninput="calculateRow(this)" class="w-full bg-white border border-slate-200 rounded-none px-2 py-2 text-xs font-black text-center qty-input">
+                                    </div>
+                                    <!-- Unit Price -->
+                                    <div class="md:col-span-2">
+                                        <input type="number" step="0.01" name="price[]" placeholder="0.00" oninput="calculateRow(this)" class="w-full bg-white border border-slate-200 rounded-none px-2 py-2 text-xs font-black price-input">
+                                    </div>
+                                    <!-- Discount -->
+                                    <div class="md:col-span-2">
+                                        <div class="flex">
+                                            <input type="number" step="0.01" name="discount_val[]" value="0" oninput="calculateRow(this)" class="w-full bg-white border border-slate-200 rounded-none px-1 py-2 text-xs font-black disc-val-input">
+                                            <select name="discount_type[]" onchange="calculateRow(this)" class="bg-slate-100 border border-l-0 border-slate-200 rounded-none px-1 py-2 text-[9px] font-bold">
+                                                <option value="Fixed">₹</option>
+                                                <option value="Percentage">%</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <!-- GST Type & Slab -->
+                                    <div class="md:col-span-2">
+                                        <div class="flex flex-col gap-1">
+                                            <select name="row_gst_mode[]" onchange="calculateRow(this)" class="w-full bg-slate-100 border border-slate-200 rounded-none px-1 py-1 text-[9px] font-black uppercase row-gst-mode">
+                                                <option value="Exclusive">Excl</option>
+                                                <option value="Inclusive">Incl</option>
+                                            </select>
+                                            <select name="gst_slab[]" onchange="calculateRow(this)" class="w-full bg-white border border-slate-200 rounded-none px-2 py-1 text-xs font-black gst-slab-select">
+                                                <option value="0">0%</option>
+                                                <option value="5">5%</option>
+                                                <option value="12">12%</option>
+                                                <option value="18">18%</option>
+                                                <option value="28">28%</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <!-- Total -->
+                                    <div class="md:col-span-2 relative">
+                                        <input type="number" step="0.01" name="row_total[]" readonly class="w-full bg-indigo-50 border-indigo-100 rounded-none px-2 py-2 text-xs font-black text-indigo-600 text-right row-total-input">
+                                        
+                                        <input type="hidden" name="taxable_value[]" class="taxable-value">
+                                        <input type="hidden" name="gst_amount[]" class="gst-amount">
+                                        <input type="hidden" name="discount_amount[]" class="discount-amount">
+
+                                        <button type="button" onclick="removeRow(this)" class="absolute -right-2 -top-2 bg-rose-500 text-white p-1 rounded-none opacity-0 group-hover:opacity-100 transition">
+                                            <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+                                        </button>
+                                    </div>
+                                </div>
+                                
+                                <div class="serial-selection-area hidden mt-3 pt-3 border-t border-slate-200/50">
+                                    <div class="serial-checkboxes grid grid-cols-1 sm:grid-cols-3 gap-2 max-h-48 overflow-y-auto pr-1"></div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="flex flex-col md:flex-row justify-between items-center gap-4 pt-6 border-t border-slate-100">
+                            <button type="button" onclick="addPartRow()" class="w-full md:w-auto bg-slate-100 text-slate-700 hover:bg-slate-200 px-6 py-2.5 rounded-none text-xs font-bold uppercase flex items-center justify-center gap-2 transition">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
+                                Add Another Product
+                            </button>
+                            <div class="w-full md:w-auto bg-slate-800 px-10 py-5 rounded-none text-right">
+                                <div class="flex flex-col text-right">
+                                    <span class="text-[9px] font-bold text-slate-500 uppercase block">Grand Total Payable</span>
+                                    <span class="text-3xl font-black text-white">₹<span id="grand-total-display">0.00</span></span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Payment & Checkout -->
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 pt-6 border-t border-slate-100">
+                        <div>
+                            <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Invoice / Bill No</label>
+                            <input type="text" name="bill_no" placeholder="Optional" class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-2.5 text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Payment Method</label>
+                            <select name="payment_method" class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-2.5 text-sm">
+                                <option value="Cash">Cash</option>
+                                <option value="UPI">UPI / QR</option>
+                                <option value="Bank Transfer">Bank Transfer</option>
+                                <option value="Pay Later">Credit (Pay Later)</option>
+                            </select>
+                        </div>
+                        <div class="md:col-span-3">
+                            <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Sale Remarks</label>
+                            <textarea name="remarks" rows="2" class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-2.5 text-sm" placeholder="Any internal notes..."></textarea>
+                        </div>
                     </div>
                 </div>
                 
-                <div id="selection-summary" class="space-y-4 mb-8 max-h-80 overflow-y-auto pr-2 custom-scrollbar">
-                    <p class="text-slate-500 italic text-center py-8 text-xs">Your items will appear here.</p>
+                <div class="p-6 bg-slate-50 border-t border-slate-100 flex justify-end">
+                    <button type="submit" name="submit_sale" class="bg-indigo-600 text-white px-12 py-3 rounded-none font-bold hover:bg-indigo-700 transition shadow-none">Finalize Sale</button>
                 </div>
+            </form>
+        </div>
 
-                <div class="space-y-4 pt-6 border-t border-white/10">
-                    <div class="grid grid-cols-2 gap-2">
-                        <div class="relative">
-                            <select name="gst_slab" id="gst_slab" onchange="calculateBill()" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 outline-none text-xs text-white appearance-none focus:ring-1 focus:ring-indigo-500">
-                                <option value="0" class="bg-slate-800 text-white">0% GST</option>
-                                <option value="5" class="bg-slate-800 text-white">5% GST</option>
-                                <option value="12" class="bg-slate-800 text-white">12% GST</option>
-                                <option value="18" selected class="bg-slate-800 text-white">18%</option>
-                                <option value="28" class="bg-slate-800 text-white">28%</option>
-                            </select>
-                            <span class="absolute -top-2 left-3 bg-slate-900 px-1 text-[8px] font-black text-slate-500 uppercase">Slab</span>
-                        </div>
-                        <div class="relative">
-                            <select name="gst_mode" id="gst_mode" onchange="calculateBill()" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 outline-none text-xs text-white appearance-none focus:ring-1 focus:ring-indigo-500">
-                                <option value="Exclusive" selected class="bg-slate-800 text-white">Exclusive</option>
-                                <option value="Inclusive" class="bg-slate-800 text-white">Inclusive</option>
-                            </select>
-                            <span class="absolute -top-2 left-3 bg-slate-900 px-1 text-[8px] font-black text-slate-500 uppercase">Mode</span>
-                        </div>
-                    </div>
-                    <div class="space-y-1">
-                        <div class="flex justify-between text-[10px] text-slate-400">
-                            <span>Subtotal</span>
-                            <span>₹<span id="sub-total-display">0.00</span></span>
-                        </div>
-                        <div class="flex justify-between text-[10px] text-slate-400">
-                            <span>Tax Amount</span>
-                            <span>₹<span id="gst-amount-display">0.00</span></span>
-                        </div>
-                        <div class="flex justify-between text-3xl font-black pt-2">
-                            <span class="text-slate-400 text-lg">Total</span>
-                            <span class="text-emerald-400">₹<span id="grand-total">0.00</span></span>
-                        </div>
-                    </div>
+        <!-- History Sidebar -->
+        <div class="space-y-6">
+            <div class="bg-white rounded-none border border-slate-100 shadow-none overflow-hidden">
+                <div class="p-6 border-b border-slate-50 bg-slate-50/50">
+                    <h2 class="text-lg font-bold text-slate-800">Recent Sales</h2>
                 </div>
-
-                <div class="mt-8 space-y-4">
-                    <label class="block text-[10px] font-bold text-slate-500 uppercase tracking-widest">Choose Payment Mode</label>
-                    <div class="grid grid-cols-2 gap-2">
-                        <label class="flex flex-col items-center justify-center p-4 border border-white/10 rounded-2xl cursor-pointer hover:bg-white/5 transition has-[:checked]:bg-indigo-600 has-[:checked]:border-indigo-500">
-                            <input type="radio" name="payment_method" value="Cash" checked class="sr-only">
-                            <span class="text-xs font-bold uppercase tracking-tighter">Cash</span>
-                        </label>
-                        <label class="flex flex-col items-center justify-center p-4 border border-white/10 rounded-2xl cursor-pointer hover:bg-white/5 transition has-[:checked]:bg-indigo-600 has-[:checked]:border-indigo-500">
-                            <input type="radio" name="payment_method" value="UPI" class="sr-only">
-                            <span class="text-xs font-bold uppercase tracking-tighter">UPI / QR</span>
-                        </label>
-                        <label class="flex flex-col items-center justify-center p-4 border border-white/10 rounded-2xl cursor-pointer hover:bg-white/5 transition has-[:checked]:bg-indigo-600 has-[:checked]:border-indigo-500 col-span-2">
-                            <input type="radio" name="payment_method" value="Pay Later" class="sr-only">
-                            <span class="text-xs font-bold uppercase tracking-widest">Pay Later (Credit)</span>
-                        </label>
-                    </div>
+                <div class="divide-y divide-slate-50 max-h-[700px] overflow-y-auto">
+                    <?php if (empty($recentSales)): ?>
+                        <p class="p-8 text-center text-slate-400 text-sm italic">No sales yet.</p>
+                    <?php else: ?>
+                        <?php foreach ($recentSales as $sale): ?>
+                        <div class="p-5 hover:bg-slate-50 transition border-l-4 border-transparent hover:border-indigo-500">
+                            <div class="flex justify-between items-start mb-2">
+                                <span class="text-[10px] font-black text-indigo-600 bg-indigo-50 px-2 py-0.5"><?php echo htmlspecialchars($sale['invoice_no']); ?></span>
+                                <span class="text-[10px] font-bold text-slate-400 uppercase tracking-tighter"><?php echo date('d M', strtotime($sale['created_at'])); ?></span>
+                            </div>
+                            <p class="text-sm font-black text-slate-800 truncate mb-1"><?php echo htmlspecialchars($sale['customer_name'] ?: 'Direct Customer'); ?></p>
+                            <div class="flex justify-between items-center mt-3">
+                                <span class="text-sm font-black text-emerald-600">₹<?php echo number_format($sale['grand_total'], 2); ?></span>
+                                <a href="invoice_gen.php?id=<?php echo $sale['id']; ?>" target="_blank" class="p-2 bg-white border border-slate-200 rounded-none text-slate-400 hover:text-indigo-600 transition shadow-sm">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
+                                </a>
+                            </div>
+                        </div>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
                 </div>
-
-                <input type="hidden" name="final_total" id="hidden-total" value="0">
-                <button type="submit" name="submit_sale" class="w-full mt-8 py-4 bg-emerald-500 hover:bg-emerald-600 text-white rounded-2xl font-black text-lg transition transform active:scale-95 shadow-2xl shadow-emerald-500/20">Finalize Sale</button>
             </div>
         </div>
-    </form>
+    </div>
 </div>
 
-<!-- Quick Add Customer Modal -->
-<div id="customerModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm hidden z-[100] flex items-center justify-center p-4 transition-all">
-    <div class="bg-white rounded-[2rem] w-full max-w-md p-8 shadow-2xl border border-slate-100">
-        <div class="flex items-center justify-between mb-6">
-            <h3 class="text-xl font-black text-slate-800">New Customer</h3>
-            <button onclick="closeCustomerModal()" class="text-slate-400 hover:text-slate-600">
+<!-- Modal -->
+<div id="customerModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm hidden z-[100] flex items-center justify-center p-4">
+    <div class="bg-white rounded-none w-full max-w-md shadow-2xl border border-slate-100 overflow-hidden">
+        <div class="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+            <h3 class="text-lg font-bold text-slate-800 uppercase tracking-tight">New Customer</h3>
+            <button onclick="closeCustomerModal()" class="text-slate-400 hover:text-slate-600 transition">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
             </button>
         </div>
-        <form id="quick-customer-form" class="space-y-4">
+        <form id="quick-customer-form" class="p-8 space-y-5">
             <div>
-                <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Full Name</label>
-                <input type="text" id="cust_name" required placeholder="John Doe" class="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Full Name *</label>
+                <input type="text" id="cust_name" required class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
             </div>
             <div>
-                <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Phone Number</label>
-                <input type="text" id="cust_phone" required placeholder="9876543210" class="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Phone *</label>
+                <input type="text" id="cust_phone" required class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
             </div>
-            <div class="flex gap-3 pt-6">
-                <button type="button" onclick="closeCustomerModal()" class="flex-1 py-4 bg-slate-100 text-slate-600 rounded-2xl font-bold hover:bg-slate-200 transition">Cancel</button>
-                <button type="button" onclick="saveCustomer()" class="flex-1 py-4 bg-indigo-600 text-white rounded-2xl font-black shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition">Create & Select</button>
+            <div>
+                <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Full Service Address *</label>
+                <textarea id="cust_address" required rows="2" class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
+            </div>
+            <div>
+                <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">GST Number (Optional)</label>
+                <input type="text" id="cust_gst" class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-indigo-500" placeholder="e.g. 29GGGGG1314R9Z6">
+            </div>
+            <div class="flex items-start">
+                <div class="flex items-center h-5">
+                    <input id="cust_amc" type="checkbox" value="1" class="w-4 h-4 border border-slate-300 rounded bg-slate-50 focus:ring-3 focus:ring-indigo-300">
+                </div>
+                <label for="cust_amc" class="ml-2 text-sm font-medium text-slate-900">Has Active AMC Contract right now</label>
+            </div>
+            <div class="flex gap-4 pt-4">
+                <button type="button" onclick="closeCustomerModal()" class="flex-1 py-3 bg-slate-100 text-slate-600 rounded-none font-bold hover:bg-slate-200 transition">Cancel</button>
+                <button type="button" onclick="saveCustomer()" class="flex-1 py-3 bg-indigo-600 text-white rounded-none font-bold hover:bg-indigo-700 transition">Save</button>
             </div>
         </form>
     </div>
 </div>
 
 <script>
-const productPrices = <?php echo json_encode($priceMap); ?>;
+const productData = <?php echo json_encode($productData); ?>;
 
-function calculateBill() {
-    const rows = document.querySelectorAll('.part-row');
-    const summaryContainer = document.getElementById('selection-summary');
-    let total = 0;
-    let summaryHtml = '<table class="w-full text-left text-xs border-collapse text-white">';
-    summaryHtml += '<thead class="text-[9px] text-slate-400 uppercase font-black border-b border-white/10"><tr><th class="pb-2">Item</th><th class="pb-2 text-right">Qty</th><th class="pb-2 text-right">Price</th></tr></thead>';
-    summaryHtml += '<tbody class="divide-y divide-white/5">';
+function updatePriceFromSelection(select) {
+    const row = select.closest('.part-row');
+    const option = select.options[select.selectedIndex];
+    if (option && option.value) {
+        const price = option.getAttribute('data-price');
+        const gst = option.getAttribute('data-gst');
+        row.querySelector('.price-input').value = price;
+        row.querySelector('.gst-slab-select').value = Math.round(gst);
+        row.querySelector('.purchase-cost-label').innerText = '₹' + parseFloat(price).toLocaleString('en-IN', {minimumFractionDigits: 2});
+    }
+}
 
-    rows.forEach(row => {
-        const productSelect = row.querySelector('.product-select');
-        const productId = productSelect.value;
-        const productName = productSelect.options[productSelect.selectedIndex]?.text.split(' (₹')[0] || '';
-        const qty = parseInt(row.querySelector('.qty-input').value) || 0;
-        
-        if (productId && productPrices[productId]) {
-            let rowTotal = 0;
-            const selectedSerials = row.querySelectorAll('.serial-checkbox:checked');
-            
-            if (selectedSerials.length > 0) {
-                summaryHtml += `<tr class="font-bold"><td class="py-2">${productName}</td><td class="py-2 text-right" colspan="2"></td></tr>`;
-                
-                selectedSerials.forEach(checkbox => {
-                    const price = parseFloat(checkbox.closest('label').getAttribute('data-price')) || 0;
-                    rowTotal += price;
-                    const sn = checkbox.closest('label').querySelector('.sn-text').innerText;
-                    summaryHtml += `<tr class="text-slate-400 italic"><td class="py-1 pl-4">└ SN: ${sn}</td><td class="py-1 text-right">1</td><td class="py-1 text-right">₹${price.toFixed(2)}</td></tr>`;
-                });
-                
-                const remaining = qty - selectedSerials.length;
-                if (remaining > 0) {
-                    const remTotal = remaining * productPrices[productId];
-                    rowTotal += remTotal;
-                    summaryHtml += `<tr class="text-slate-400"><td class="py-1 pl-4">└ Un-serialized</td><td class="py-1 text-right">x${remaining}</td><td class="py-1 text-right">₹${remTotal.toFixed(2)}</td></tr>`;
-                }
-            } else {
-                rowTotal = productPrices[productId] * qty;
-                summaryHtml += `<tr><td class="py-2 font-bold">${productName}</td><td class="py-2 text-right">x${qty}</td><td class="py-2 text-right">₹${rowTotal.toFixed(2)}</td></tr>`;
-            }
-            total += rowTotal;
-        }
-    });
+function calculateRow(el) {
+    const row = el.closest('.part-row');
+    const qty = parseFloat(row.querySelector('.qty-input').value) || 0;
+    const unitPrice = parseFloat(row.querySelector('.price-input').value) || 0;
+    const gstRate = parseFloat(row.querySelector('.gst-slab-select').value) || 0;
+    const gstMode = row.querySelector('.row-gst-mode').value;
+    const discVal = parseFloat(row.querySelector('.disc-val-input').value) || 0;
+    const discType = row.querySelector('select[name="discount_type[]"]').value;
 
-    summaryHtml += '</tbody></table>';
-    summaryContainer.innerHTML = total > 0 ? summaryHtml : '<p class="text-slate-500 italic text-center py-8 text-xs">Your items will appear here.</p>';
-    
-    const gstSlab = parseFloat(document.getElementById('gst_slab').value) || 0;
-    const gstMode = document.getElementById('gst_mode').value;
-    
-    let finalSubtotal = 0;
-    let finalGstAmount = 0;
-    let finalGrandTotal = 0;
-
-    if (gstMode === 'Inclusive') {
-        finalGrandTotal = total;
-        finalSubtotal = finalGrandTotal / (1 + (gstSlab / 100));
-        finalGstAmount = finalGrandTotal - finalSubtotal;
+    let discountAmount = 0;
+    if (discType === 'Percentage') {
+        discountAmount = (unitPrice * qty) * (discVal / 100);
     } else {
-        finalSubtotal = total;
-        finalGstAmount = finalSubtotal * (gstSlab / 100);
-        finalGrandTotal = finalSubtotal + finalGstAmount;
+        discountAmount = discVal * qty;
     }
 
-    document.getElementById('sub-total-display').innerText = finalSubtotal.toFixed(2);
-    document.getElementById('gst-amount-display').innerText = finalGstAmount.toFixed(2);
-    document.getElementById('grand-total').innerText = finalGrandTotal.toFixed(2);
-    document.getElementById('hidden-total').value = finalGrandTotal.toFixed(2);
+    let taxableValue = 0;
+    let gstAmount = 0;
+    let total = 0;
+
+    const rawSubtotal = (unitPrice * qty) - discountAmount;
+
+    if (gstMode === 'Inclusive') {
+        total = rawSubtotal;
+        taxableValue = total / (1 + (gstRate / 100));
+        gstAmount = total - taxableValue;
+    } else {
+        taxableValue = rawSubtotal;
+        gstAmount = taxableValue * (gstRate / 100);
+        total = taxableValue + gstAmount;
+    }
+
+    row.querySelector('.taxable-value').value = taxableValue.toFixed(2);
+    row.querySelector('.gst-amount').value = gstAmount.toFixed(2);
+    row.querySelector('.discount-amount').value = discountAmount.toFixed(2);
+    row.querySelector('.row-total-input').value = total.toFixed(2);
+
+    updateGrandTotal();
+}
+
+function updateGrandTotal() {
+    let grandTotal = 0;
+    document.querySelectorAll('.row-total-input').forEach(input => {
+        grandTotal += parseFloat(input.value) || 0;
+    });
+    document.getElementById('grand-total-display').innerText = grandTotal.toLocaleString('en-IN', {minimumFractionDigits: 2});
 }
 
 async function loadSerials(selectEl) {
@@ -377,7 +456,6 @@ async function loadSerials(selectEl) {
     
     if (!productId) {
         serialArea.classList.add('hidden');
-        calculateBill();
         return;
     }
 
@@ -389,19 +467,12 @@ async function loadSerials(selectEl) {
             serialArea.classList.remove('hidden');
             serialContainer.innerHTML = '';
             serials.forEach(s => {
-                const price = parseFloat(s.purchase_price) || 0;
                 const label = document.createElement('label');
-                label.className = 'flex items-center justify-between p-3 rounded-xl bg-white border border-slate-100 hover:border-indigo-200 hover:bg-indigo-50/50 cursor-pointer transition mb-2 shadow-sm group/serial';
-                label.setAttribute('data-price', price);
+                label.className = 'flex items-center justify-between p-2 rounded-none bg-white border border-slate-100 hover:border-indigo-200 cursor-pointer transition';
                 label.innerHTML = `
-                    <div class="flex items-center gap-3">
-                        <input type="checkbox" name="serial_ids[]" value="${s.id}" onchange="calculateBill()" class="w-5 h-5 text-indigo-600 rounded-lg border-slate-300 transition serial-checkbox">
-                        <div class="flex flex-col">
-                            <span class="text-xs font-black text-slate-700 sn-text">${s.serial_number}</span>
-                        </div>
-                    </div>
-                    <div class="text-right">
-                        <span class="block text-xs font-black text-indigo-600">₹${price.toFixed(2)}</span>
+                    <div class="flex items-center gap-2">
+                        <input type="checkbox" name="serial_ids[]" value="${s.id}" class="w-4 h-4 text-indigo-600 rounded-none serial-checkbox">
+                        <span class="text-[10px] font-bold text-slate-700">${s.serial_number}</span>
                     </div>
                 `;
                 serialContainer.appendChild(label);
@@ -409,8 +480,7 @@ async function loadSerials(selectEl) {
         } else {
             serialArea.classList.add('hidden');
         }
-        calculateBill();
-    } catch (e) { console.error(e); }
+    } catch (error) { console.error(error); }
 }
 
 function addPartRow() {
@@ -419,10 +489,21 @@ function addPartRow() {
     const newRow = firstRow.cloneNode(true);
     newRow.querySelector('.product-select').value = "";
     newRow.querySelector('.qty-input').value = "1";
+    newRow.querySelector('.price-input').value = "";
+    newRow.querySelector('.disc-val-input').value = "0";
+    newRow.querySelector('.row-total-input').value = "0.00";
+    newRow.querySelector('.purchase-cost-label').innerText = "₹0.00";
     newRow.querySelector('.serial-selection-area').classList.add('hidden');
     newRow.querySelector('.serial-checkboxes').innerHTML = '';
     container.appendChild(newRow);
-    calculateBill();
+}
+
+function removeRow(btn) {
+    const rows = document.querySelectorAll('.part-row');
+    if (rows.length > 1) {
+        btn.closest('.part-row').remove();
+        updateGrandTotal();
+    }
 }
 
 function openCustomerModal() { document.getElementById('customerModal').classList.remove('hidden'); }
@@ -431,32 +512,32 @@ function closeCustomerModal() { document.getElementById('customerModal').classLi
 async function saveCustomer() {
     const name = document.getElementById('cust_name').value;
     const phone = document.getElementById('cust_phone').value;
-    if (!name || !phone) return alert("Please fill name and phone.");
+    const address = document.getElementById('cust_address').value;
+    const gst = document.getElementById('cust_gst').value;
+    const amc = document.getElementById('cust_amc').checked;
+    
+    if (!name || !phone || !address) return alert("Fill all required fields");
 
     const formData = new FormData();
     formData.append('customer_name', name);
     formData.append('phone', phone);
-    formData.append('address', 'Direct Sale Entry');
+    formData.append('address', address);
+    if (gst) formData.append('gst_number', gst);
+    if (amc) formData.append('has_active_amc', '1');
 
-    try {
-        const response = await fetch('../accounts/ajax_add_customer.php', {
-            method: 'POST',
-            body: formData
-        });
-        const data = await response.json();
-        if (data.success) {
-            const select = document.getElementById('customer_select');
-            const opt = document.createElement('option');
-            opt.value = data.id;
-            opt.text = `${name} (${phone})`;
-            opt.selected = true;
-            select.appendChild(opt);
-            closeCustomerModal();
-        } else {
-            alert("Error: " + data.message);
-        }
-    } catch (e) { alert("Failed to save customer."); }
+    const res = await fetch('ajax_add_customer.php', { method: 'POST', body: formData });
+    const data = await res.json();
+    if (data.success) {
+        const sel = document.getElementById('customer_select');
+        const opt = new Option(name + " (" + phone + ")", data.id);
+        sel.add(opt);
+        sel.value = data.id;
+        closeCustomerModal();
+        document.getElementById('quick-customer-form').reset();
+    } else {
+        alert(data.message || "Error saving customer");
+    }
 }
 </script>
 
-<?php require_once '../../includes/header.php'; ?>
+<?php require_once '../../includes/footer.php'; ?>

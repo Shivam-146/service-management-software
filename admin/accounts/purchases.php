@@ -13,6 +13,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_outflow'])) {
     $category = $_POST['category'] ?: 'Inventory Purchase';
     $date = $_POST['purchase_date'];
     $bill_no = $_POST['bill_no'];
+    if (empty($bill_no)) {
+        $bill_no = 'PUR' . time();
+    }
     $payment_method = $_POST['payment_method'];
     $reference_no = $_POST['reference_no'] ?? null;
     $notes = $_POST['notes'] ?? null;
@@ -26,6 +29,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_outflow'])) {
         $pdo->beginTransaction();
 
         if ($is_inventory) {
+            if (empty($supplier_id)) throw new Exception("Please select a supplier before adding inventory.");
+            
             $product_ids = $_POST['product_id'];
             $quantities = $_POST['qty'];
             $prices = $_POST['price'];
@@ -68,13 +73,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_outflow'])) {
                 $total = $row_totals[$index];
 
                 // 2. Insert Purchase Item
+                // If inclusive, use taxable_val as unit_price for accounting integrity
+                $unit_price_to_save = $price;
+                if ($row_totals[$index] > 0) {
+                     $unit_price_to_save = $taxable_val;
+                }
+
                 $stmt = $pdo->prepare("INSERT INTO purchase_items (purchase_id, product_id, quantity, unit_price, taxable_value, gst_rate, gst_amount, discount_type, discount_value, discount_amount, total_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                $stmt->execute([$purchase_id, $pid, $qty, $price, $taxable_val, $gst_rate, $gst_amt, $disc_type, $disc_val, $disc_amt, $total]);
+                $stmt->execute([$purchase_id, $pid, $qty, $unit_price_to_save, $taxable_val, $gst_rate, $gst_amt, $disc_type, $disc_val, $disc_amt, $total]);
                 $item_id = $pdo->lastInsertId();
 
-                // 3. Update Product Stock
-                $stmt = $pdo->prepare("UPDATE products SET current_stock = current_stock + ? WHERE id = ?");
-                $stmt->execute([$qty, $pid]);
+                // 3. Update Product Stock and Default GST
+                $stmt = $pdo->prepare("UPDATE products SET current_stock = current_stock + ?, gst_rate = ? WHERE id = ?");
+                $stmt->execute([$qty, $gst_rate, $pid]);
 
                 // 4. Record Stock Movement
                 $stmt = $pdo->prepare("INSERT INTO stock_movements (product_id, type, quantity, reference_id, notes) VALUES (?, 'Stock In', ?, ?, ?)");
@@ -84,6 +95,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_outflow'])) {
 
         $pdo->commit();
         $successMsg = ($is_inventory ? "Purchase recorded & stock updated!" : "General expense recorded successfully!");
+        $successMsg .= " <a href='purchase_bill_gen.php?id=$purchase_id' class='font-bold underline ml-2'>Print Bill</a>";
     } catch (Exception $e) {
         $pdo->rollBack();
         $errorMsg = $e->getMessage();
@@ -142,7 +154,7 @@ require_once '../../includes/header.php';
                                 <label class="block text-[10px] font-bold text-slate-400 uppercase">Supplier / Payee</label>
                                 <button type="button" onclick="openSupplierModal()" class="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 uppercase">+ Add New</button>
                             </div>
-                            <select id="supplier_id" name="supplier_id" class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                            <select id="supplier_id" name="supplier_id" onchange="checkSupplier()" class="w-full bg-slate-50 border border-slate-200 rounded-none px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
                                 <option value="">Select Supplier</option>
                                 <?php foreach ($suppliers as $s): ?>
                                     <option value="<?php echo $s['id']; ?>"><?php echo htmlspecialchars($s['supplier_name']); ?></option>
@@ -210,6 +222,7 @@ require_once '../../includes/header.php';
                                     <div class="md:col-span-2">
                                         <label class="md:hidden text-[9px] font-black text-slate-400 uppercase mb-1 block">Unit Price</label>
                                         <input type="number" step="0.01" name="price[]" placeholder="0.00" required oninput="calculateRow(this)" class="w-full bg-slate-50 border border-slate-200 rounded-none px-3 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500 outline-none">
+                                        <p class="text-[9px] font-bold text-slate-400 mt-1 uppercase net-price-display hidden">Net Cost: ₹0.00</p>
                                     </div>
 
                                     <!-- Discount -->
@@ -245,7 +258,7 @@ require_once '../../includes/header.php';
                                     <!-- Total -->
                                     <div class="md:col-span-2 relative">
                                         <label class="md:hidden text-[9px] font-black text-slate-400 uppercase mb-1 block">Line Total</label>
-                                        <input type="number" step="0.01" name="row_total[]" readonly class="w-full bg-indigo-50 border-indigo-100 rounded-none px-3 py-2.5 text-sm font-black text-indigo-600 text-right">
+                                        <input type="number" step="0.01" name="row_total[]" oninput="calculateFromTotal(this)" class="w-full bg-indigo-50 border-indigo-100 rounded-none px-3 py-2.5 text-sm font-black text-indigo-600 text-right outline-none focus:ring-2 focus:ring-indigo-500">
                                         
                                         <input type="hidden" name="taxable_value[]" class="taxable-value">
                                         <input type="hidden" name="gst_amount[]" class="gst-amount">
@@ -350,7 +363,12 @@ require_once '../../includes/header.php';
                                 <span class="text-[10px] text-slate-400 font-medium italic">
                                     <?php echo $p['is_inventory'] ? htmlspecialchars($p['products_summary']) : htmlspecialchars($p['category']); ?>
                                 </span>
-                                <span class="text-sm font-black text-rose-600">₹<?php echo number_format($p['total_amount'], 2); ?></span>
+                                <div class="flex items-center gap-3">
+                                    <span class="text-sm font-black text-rose-600">₹<?php echo number_format($p['total_amount'], 2); ?></span>
+                                    <a href="purchase_bill_gen.php?id=<?php echo $p['id']; ?>" class="p-1.5 bg-indigo-50 text-indigo-600 rounded hover:bg-indigo-100 transition" title="View Bill">
+                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
+                                    </a>
+                                </div>
                             </div>
                         </div>
                         <?php endforeach; ?>
@@ -451,6 +469,20 @@ require_once '../../includes/header.php';
 </div>
 
 <script>
+function checkSupplier() {
+    const supplierId = document.getElementById('supplier_id').value;
+    const invSection = document.getElementById('inventory-section');
+    const type = document.getElementById('outflow_type').value;
+    
+    if (type === 'Inventory') {
+        if (!supplierId) {
+            invSection.classList.add('opacity-40', 'pointer-events-none');
+        } else {
+            invSection.classList.remove('opacity-40', 'pointer-events-none');
+        }
+    }
+}
+
 function setType(type) {
     document.getElementById('outflow_type').value = type;
     const invBtn = document.getElementById('btn-inventory');
@@ -478,6 +510,7 @@ function setType(type) {
         payGrp.classList.remove('hidden');
         catGrp.classList.remove('hidden');
     }
+    checkSupplier();
 }
 
 function toggleChequeFields(method) {
@@ -490,6 +523,12 @@ function toggleChequeFields(method) {
 }
 
 function addItem() {
+    const supplierSelect = document.getElementById('supplier_id');
+    if (supplierSelect && !supplierSelect.value) {
+        alert("Please select a supplier first before adding products.");
+        supplierSelect.focus();
+        return;
+    }
     const container = document.getElementById('items-container');
     const rows = container.querySelectorAll('.purchase-row');
     const firstRow = rows[0];
@@ -539,11 +578,17 @@ function calculateRow(el) {
         rowTotal = baseTotal - discAmt;
         taxableValue = rowTotal / (1 + (gstSlab / 100));
         gstAmount = rowTotal - taxableValue;
+        
+        // Show Net Cost indicator
+        const netCost = taxableValue / qty || 0;
+        row.querySelector('.net-price-display').innerText = 'Net Cost: ₹' + netCost.toFixed(2);
+        row.querySelector('.net-price-display').classList.remove('hidden');
     } else {
         // Exclusive calculation after discount
         taxableValue = baseTotal - discAmt;
         gstAmount = taxableValue * (gstSlab / 100);
         rowTotal = taxableValue + gstAmount;
+        row.querySelector('.net-price-display').classList.add('hidden');
     }
 
     row.querySelector('input[name="row_total[]"]').value = rowTotal.toFixed(2);
@@ -554,6 +599,27 @@ function calculateRow(el) {
     row.querySelector('.discount-amount').value = (discAmt / qty || 0).toFixed(2);
     
     calculateGrandTotal();
+}
+
+function calculateFromTotal(el) {
+    const row = el.closest('.purchase-row');
+    const rowTotal = parseFloat(el.value) || 0;
+    const qty = parseFloat(row.querySelector('input[name="qty[]"]').value) || 0;
+    const gstType = row.querySelector('select[name="gst_type[]"]').value;
+    const gstSlab = parseFloat(row.querySelector('select[name="gst_slab[]"]').value) || 0;
+
+    if (gstType === 'Inclusive' && qty > 0) {
+        // If inclusive, the Line Total is the base for back-calculation
+        // Unit Price (Inclusive) = rowTotal / qty
+        const unitPriceIncl = rowTotal / qty;
+        row.querySelector('input[name="price[]"]').value = unitPriceIncl.toFixed(2);
+        
+        // Re-run normal calculation to fill hidden fields
+        calculateRow(row.querySelector('input[name="price[]"]'));
+    } else {
+        // If exclusive, entering Line Total is not standard, but we'll re-calculate
+        calculateRow(row.querySelector('input[name="price[]"]'));
+    }
 }
 
 function calculateGrandTotal() {
@@ -663,6 +729,11 @@ document.getElementById('productForm').onsubmit = async function(e) {
         btn.disabled = false;
     }
 };
+
+// Initialize
+document.addEventListener('DOMContentLoaded', function() {
+    checkSupplier();
+});
 </script>
 
 <?php require_once '../../includes/footer.php'; ?>

@@ -43,13 +43,16 @@ try {
 
     // Add serials to lines
     foreach ($serials as $s) {
-        $pStmt = $pdo->prepare("SELECT product_name FROM products WHERE id = ?");
+        $pStmt = $pdo->prepare("SELECT product_name, product_code FROM products WHERE id = ?");
         $pStmt->execute([$s['product_id']]);
-        $pName = $pStmt->fetchColumn() ?: "Unknown Product";
+        $product = $pStmt->fetch();
+        $pName = $product['product_name'] ?? "Unknown Product";
+        $pCode = $product['product_code'] ?? "";
         
         $price = (float)$s['purchase_price'];
         $lines[] = [
             'name' => $pName . " (SN: " . $s['serial_number'] . ")",
+            'hsn' => $pCode,
             'price' => $price,
             'qty' => 1,
             'total' => $price
@@ -67,7 +70,7 @@ try {
         $remainingQty = max(0, $qty - $serialsUsed);
 
         if ($remainingQty > 0) {
-            $pStmt = $pdo->prepare("SELECT product_name, unit_price FROM products WHERE id = ?");
+            $pStmt = $pdo->prepare("SELECT product_name, product_code, unit_price FROM products WHERE id = ?");
             $pStmt->execute([$pid]);
             $product = $pStmt->fetch();
             if ($product) {
@@ -75,6 +78,7 @@ try {
                 $total = $remainingQty * $price;
                 $lines[] = [
                     'name' => $product['product_name'] . " (Un-serialized)",
+                    'hsn' => $product['product_code'],
                     'price' => $price,
                     'qty' => $remainingQty,
                     'total' => $total
@@ -186,6 +190,9 @@ $isPrint = isset($_GET['print']);
                 <tr>
                     <td class="py-5 px-2">
                         <p class="font-bold text-slate-800 text-sm"><?php echo htmlspecialchars($line['name']); ?></p>
+                        <?php if (!empty($line['hsn'])): ?>
+                            <p class="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-1">HSN Code: <?php echo htmlspecialchars($line['hsn']); ?></p>
+                        <?php endif; ?>
                     </td>
                     <td class="py-5 px-2 text-center text-slate-600 text-sm"><?php echo $line['qty']; ?></td>
                     <td class="py-5 px-2 text-right text-slate-600 text-sm">₹<?php echo number_format($line['price'], 2); ?></td>

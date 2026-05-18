@@ -284,7 +284,7 @@ require_once '../../includes/header.php';
                                 <textarea name="sn_text[]" rows="4" required placeholder="SN1001&#10;SN1002&#10;SN1003" class="w-full bg-white border border-slate-200 rounded-none px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
                             </div>
                             <div class="md:col-span-4">
-                                <label class="block text-[9px] font-black text-slate-400 uppercase mb-1">Unit Purchase Price</label>
+                                <label class="block text-[9px] font-black text-slate-400 uppercase mb-1">Unit Selling Price</label>
                                 <input type="number" step="0.01" name="group_prices[]" required placeholder="0.00" class="w-full bg-white border border-slate-200 rounded-none px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
                                 <p class="text-[9px] text-slate-400 mt-2 italic">This price applies to this box.</p>
                             </div>

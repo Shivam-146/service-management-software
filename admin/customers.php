@@ -91,6 +91,7 @@ if (isset($_GET['history_id'])) {
                         <th class="px-6 py-4 font-semibold">ID</th>
                         <th class="px-6 py-4 font-semibold">Name</th>
                         <th class="px-6 py-4 font-semibold">Contact</th>
+                        <th class="px-6 py-4 font-semibold">Outstanding Due</th>
                         <th class="px-6 py-4 font-semibold">AMC Status</th>
                         <th class="px-6 py-4 font-semibold">Actions</th>
                     </tr>
@@ -111,6 +112,11 @@ if (isset($_GET['history_id'])) {
                         </td>
                         <td class="px-6 py-4 text-sm text-slate-600">
                             <?php echo htmlspecialchars($customer['phone']); ?>
+                        </td>
+                        <td class="px-6 py-4">
+                            <div class="text-sm font-black <?php echo $customer['due_amount'] > 0 ? 'text-rose-600' : 'text-slate-400'; ?>">
+                                ₹<?php echo number_format($customer['due_amount'] ?? 0, 2); ?>
+                            </div>
                         </td>
                         <td class="px-6 py-4">
                             <?php if ($customer['has_active_amc']): ?>

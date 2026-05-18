@@ -93,6 +93,38 @@ $modules = [
         'desc' => 'Monitor pending payments and overdue accounts.'
     ],
     [
+        'title' => 'Customer Ledger',
+        'link' => 'customer_ledger.php',
+        'icon' => '📖',
+        'bg' => 'bg-indigo-100',
+        'text' => 'text-indigo-600',
+        'desc' => 'Detailed statement of all invoices and payments per customer.'
+    ],
+    [
+        'title' => 'Supplier Ledger',
+        'link' => 'supplier_ledger.php',
+        'icon' => '🚚',
+        'bg' => 'bg-violet-100',
+        'text' => 'text-violet-600',
+        'desc' => 'Track all purchases and payments for individual vendors.'
+    ],
+    [
+        'title' => 'Sales Returns',
+        'link' => 'sales_returns.php',
+        'icon' => '↩️',
+        'bg' => 'bg-rose-100',
+        'text' => 'text-rose-600',
+        'desc' => 'Process customer returns and update stock/dues.'
+    ],
+    [
+        'title' => 'Purchase Returns',
+        'link' => 'purchase_returns.php',
+        'icon' => '⤴️',
+        'bg' => 'bg-amber-100',
+        'text' => 'text-amber-600',
+        'desc' => 'Return items to suppliers and adjust payables.'
+    ],
+    [
         'title' => 'Export Reports',
         'link' => 'export_reports.php',
         'icon' => '📤',

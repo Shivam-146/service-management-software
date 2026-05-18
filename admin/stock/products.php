@@ -36,12 +36,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['adjust_stock'])) {
                 $old_opening = $old_prod->fetchColumn() ?: 0;
                 $diff = $min - $old_opening;
 
-                // Removed unit_price from the UPDATE query
                 $stmt = $pdo->prepare("UPDATE products SET category_id=?, product_name=?, product_code=?, unit=?, opening_stock=?, current_stock = current_stock + ?, description=? WHERE id=?");
                 $stmt->execute([$cat_id, $name, $code, $unit, $min, $diff, $desc, $id]);
                 $successMsg = "Product updated successfully!";
             } else {
-                // Removed unit_price from the INSERT query
                 $stmt = $pdo->prepare("INSERT INTO products (category_id, product_name, product_code, unit, opening_stock, current_stock, description) VALUES (?, ?, ?, ?, ?, ?, ?)");
                 $stmt->execute([$cat_id, $name, $code, $unit, $min, $min, $desc]);
                 $successMsg = "Product added successfully!";

@@ -13,7 +13,7 @@ try {
     $role = $_SESSION['role'] ?? 'technician';
     $techId = $_SESSION['user_id'];
     
-    $query = "SELECT s.id, s.serial_number, s.purchase_price, p.unit_price 
+    $query = "SELECT s.id, s.serial_number, s.purchase_price, p.unit_price, p.gst_rate 
               FROM product_serials s 
               JOIN products p ON s.product_id = p.id
               WHERE s.product_id = ? AND s.status = 'In Stock'";

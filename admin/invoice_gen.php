@@ -46,7 +46,7 @@ try {
     
     if (!empty($partsConsumed)) {
         foreach ($partsConsumed as $part) {
-            $pStmt = $pdo->prepare("SELECT product_name as item_name, unit_price FROM products WHERE id = ?");
+            $pStmt = $pdo->prepare("SELECT product_name as item_name, product_code, unit_price FROM products WHERE id = ?");
             $pStmt->execute([$part['product_id']]);
             $product = $pStmt->fetch();
             
@@ -55,8 +55,15 @@ try {
                 $price = $product['unit_price'];
                 $total = $qty * $price;
                 
+
+                $sStmt = $pdo->prepare("SELECT serial_number FROM product_serials WHERE product_id = ? AND invoice_id = (SELECT id FROM invoices WHERE complaint_id = ? LIMIT 1)");
+                $sStmt->execute([$part['product_id'], $complaintId]);
+                $sns = $sStmt->fetchAll(PDO::FETCH_COLUMN);
+                $snText = !empty($sns) ? " (SN: " . implode(', ', $sns) . ")" : "";
+
                 $lines[] = [
-                    'name' => $product['item_name'],
+                    'name' => $product['item_name'] . $snText,
+                    'hsn' => $product['product_code'],
                     'price' => $price,
                     'qty' => $qty,
                     'total' => $total
@@ -155,6 +162,9 @@ $isPrint = isset($_GET['print']);
                 <tr>
                     <td class="py-5 px-2">
                         <p class="font-bold text-slate-800 text-sm"><?php echo htmlspecialchars($line['name']); ?></p>
+                        <?php if (!empty($line['hsn'])): ?>
+                            <p class="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-1">HSN Code: <?php echo htmlspecialchars($line['hsn']); ?></p>
+                        <?php endif; ?>
                     </td>
                     <td class="py-5 px-2 text-center text-slate-600 text-sm"><?php echo $line['qty']; ?></td>
                     <td class="py-5 px-2 text-right text-slate-600 text-sm">₹<?php echo number_format($line['price'], 2); ?></td>

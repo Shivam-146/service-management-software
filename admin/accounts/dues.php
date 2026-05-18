@@ -9,14 +9,13 @@ $customer_dues_query = "
         c.id, 
         c.customer_name, 
         c.phone,
-        IFNULL((SELECT SUM(grand_total) FROM invoices WHERE complaint_id IN (SELECT id FROM complaints WHERE customer_id = c.id)), 0) as total_invoiced,
+        IFNULL((SELECT SUM(grand_total) FROM invoices WHERE customer_id = c.id), 0) as total_invoiced,
         IFNULL((SELECT SUM(amount) FROM payments WHERE customer_id = c.id), 0) as total_paid
     FROM customers c
     HAVING (total_invoiced - total_paid) > 0
     ORDER BY (total_invoiced - total_paid) DESC
 ";
 
-// Fetch Outstanding Dues to Suppliers
 $supplier_dues_query = "
     SELECT 
         s.id, 

@@ -10,8 +10,8 @@ if (!$product_id) {
 }
 
 try {
-    // Fetch latest purchase price for this product
-    $stmt = $pdo->prepare("SELECT unit_price FROM purchase_items WHERE product_id = ? ORDER BY id DESC LIMIT 1");
+    // Fetch latest taxable value (per unit) for this product
+    $stmt = $pdo->prepare("SELECT taxable_value FROM purchase_items WHERE product_id = ? ORDER BY id DESC LIMIT 1");
     $stmt->execute([$product_id]);
     $price = $stmt->fetchColumn() ?: 0;
     echo json_encode(['price' => $price]);
